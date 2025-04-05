@@ -4,7 +4,15 @@ import "@nomicfoundation/hardhat-ethers";
 import "@nomicfoundation/hardhat-chai-matchers";
 
 const config: HardhatUserConfig = {
-  solidity: "0.8.28",
+    solidity: {
+        version: "0.8.28",
+        settings: {
+            optimizer: {
+                enabled: true,
+                runs: 200
+            }
+        }
+    }
 };
 
 export default config;
