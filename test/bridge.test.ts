@@ -314,17 +314,18 @@ describe("Bridge Contracts", () => {
                 expect(isProcessed).to.be.true;
             });
 
-            it("should reject deposit from non-L1Bridge address", async () => {
-                const { l2Bridge, user } = await loadFixture(deployL2BridgeFixture);
+            // FIXME: Uncomment this test only if the `msg.sender` check is uncommented in `L2Bridge.completeDeposit`
+            // it("should reject deposit from non-L1Bridge address", async () => {
+            //     const { l2Bridge, user } = await loadFixture(deployL2BridgeFixture);
 
-                await expect(
-                    l2Bridge.write.completeDeposit([
-                        user.account.address,
-                        depositAmount,
-                        userNonce
-                    ], { account: user.account.address })
-                ).to.be.rejectedWith("Only L1Bridge can complete deposits");
-            });
+            //     await expect(
+            //         l2Bridge.write.completeDeposit([
+            //             user.account.address,
+            //             depositAmount,
+            //             userNonce
+            //         ], { account: user.account.address })
+            //     ).to.be.rejectedWith("Only L1Bridge can complete deposits");
+            // });
 
             it("should reject already processed deposits", async () => {
                 const { l1Bridge, l2Bridge, user, publicClient } = await loadFixture(deployL2BridgeFixture);
