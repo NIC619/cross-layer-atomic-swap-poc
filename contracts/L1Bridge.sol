@@ -28,8 +28,6 @@ contract L1Bridge is ReentrancyGuard {
     mapping(bytes32 => bool) public verifiedWithdrawals;
     mapping(bytes32 => bool) public claimedWithdrawals;
 
-    constructor() {}
-
     // Function to deposit
     function deposit() external payable nonReentrant {
         require(msg.value > 0, "Zero deposit amount");
@@ -62,8 +60,6 @@ contract L1Bridge is ReentrancyGuard {
         uint256 userL2Nonce,
         bytes32 withdrawMessageHash
     ) external nonReentrant {
-        require(user != address(0), "Invalid user address");
-        require(amount > 0, "Amount must be greater than 0");
         require(verifiedWithdrawals[withdrawMessageHash], "Withdrawal not verified");
         require(!claimedWithdrawals[withdrawMessageHash], "Withdrawal already claimed");
 
