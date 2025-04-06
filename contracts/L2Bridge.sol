@@ -2,11 +2,19 @@
 pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import "hardhat/console.sol";
 
 contract L2Bridge is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     address public immutable L1Bridge;
+    address public constant ETH = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+
+    // Enum for swap status
+    enum SwapStatus { NotExist, Open, Filled, Expired }
 
     event DepositCompleted(
         address indexed user,
@@ -15,8 +23,31 @@ contract L2Bridge is ReentrancyGuard {
         bytes32 indexed messageHash
     );
 
+    event RequestSwapCompleted(
+        address indexed userA,
+        uint256 ETHAmount,
+        address userB,
+        address token,
+        uint256 expectedTokenAmount,
+        uint256 nonce,
+        uint64 expiry,
+        bytes32 indexed messageHash
+    );
+
+    event SwapFilled(
+        address indexed userA,
+        uint256 ETHAmount,
+        address indexed userB,
+        address token,
+        uint256 expectedTokenAmount,
+        uint256 nonce,
+        uint64 expiry,
+        bytes32 indexed messageHash
+    );
+
     event Withdraw(
         address indexed user,
+        address indexed token,
         uint256 amount,
         uint256 nonce
     );
@@ -24,6 +55,7 @@ contract L2Bridge is ReentrancyGuard {
     // State variables
     mapping(address => uint256) public userNonces;
     mapping(bytes32 => bool) public processedMessages;
+    mapping(bytes32 => SwapStatus) public swapStatus;
 
     /**
      * @dev Constructor that sets the L1Bridge address
@@ -66,6 +98,97 @@ contract L2Bridge is ReentrancyGuard {
     }
 
     /**
+     * @dev Completes a swap request initiated on L1Bridge
+     * @param userA Address of the user who initiated the swap on L1Bridge
+     * @param ETHAmount Amount of ETH for the swap
+     * @param userB Address of the counterparty for the swap (can be zero address)
+     * @param token Address of the ERC20 token
+     * @param expectedTokenAmount Amount of ERC20 tokens for the swap
+     * @param nonce User's nonce on L1Bridge
+     * @param expiry Timestamp when the swap expires
+     */
+    function completeRequestSwap(
+        address userA,
+        uint256 ETHAmount,
+        address userB,
+        address token,
+        uint256 expectedTokenAmount,
+        uint256 nonce,
+        uint64 expiry
+    ) external payable nonReentrant {
+        // FIXME: Can not impersonate L1Bridge in local testnet. Got `Unknown account` error.
+        // // Only L1Bridge can call this function
+        // require(msg.sender == L1Bridge, "Only L1Bridge can complete deposits");
+
+        // Compute the message hash
+        bytes32 messageHash = keccak256(abi.encode(userA, ETHAmount, userB, token, expectedTokenAmount, nonce, expiry));
+
+        // Check if this message has already been processed
+        require(!processedMessages[messageHash], "Message already processed");
+
+        // Mark message as processed
+        processedMessages[messageHash] = true;
+
+        // Set the swap status to Open
+        swapStatus[messageHash] = SwapStatus.Open;
+
+        emit RequestSwapCompleted(userA, ETHAmount, userB, token, expectedTokenAmount, nonce, expiry, messageHash);
+    }
+
+    /**
+     * @dev Fills a swap initiated on L1Bridge
+     * @param userA Address of the user who initiated the swap on L1Bridge
+     * @param ETHAmount Amount of ETH for the swap
+     * @param userB Address of the counterparty for the swap (can be zero address)
+     * @param token Address of the ERC20 token
+     * @param expectedTokenAmount Amount of ERC20 tokens for the swap
+     * @param nonce User's nonce on L1Bridge
+     * @param expiry Timestamp when the swap expires
+     */
+    function fillSwap(
+        address userA,
+        uint256 ETHAmount,
+        address userB,
+        address token,
+        uint256 expectedTokenAmount,
+        uint256 nonce,
+        uint64 expiry
+    ) external nonReentrant {
+        // Compute the message hash
+        bytes32 messageHash = keccak256(abi.encode(userA, ETHAmount, userB, token, expectedTokenAmount, nonce, expiry));
+
+        // Check if the swap has not been filled yet
+        require(swapStatus[messageHash] == SwapStatus.Open, "Swap already filled or expired");
+
+        // Check if the swap has not expired
+        require(block.timestamp <= expiry, "Swap has expired");
+
+        // If userB is specified, verify that the caller is userB
+        if (userB != address(0)) {
+            require(msg.sender == userB, "Only userB can fill the swap");
+        }
+
+        // Mark the swap as filled
+        swapStatus[messageHash] = SwapStatus.Filled;
+
+        // First transfer ERC20 tokens from the caller to this contract
+        IERC20(token).safeTransferFrom(msg.sender, address(this), expectedTokenAmount);
+
+        // Then transfer ETH to the caller
+        (bool success, ) = msg.sender.call{value: ETHAmount}("");
+        require(success, "ETH transfer failed");
+
+        emit SwapFilled(userA, ETHAmount, userB, token, expectedTokenAmount, nonce, expiry, messageHash);
+
+        // Initiate withdrawal of tokens to userA on L1
+        // Get current nonce for the withdrawal
+        uint256 currentNonce = userNonces[userA];
+        userNonces[userA] = currentNonce + 1;
+
+        emit Withdraw(userA, token, expectedTokenAmount, currentNonce);
+    }
+
+    /**
      * @dev Allows users to withdraw ETH from L2 to L1
      */
     function withdraw() external payable nonReentrant {
@@ -75,9 +198,7 @@ contract L2Bridge is ReentrancyGuard {
         uint256 currentNonce = userNonces[msg.sender];
         userNonces[msg.sender] = currentNonce + 1;
 
-        // bytes32 messageHash = keccak256(abi.encode(msg.sender, msg.value, currentNonce));
-
-        emit Withdraw(msg.sender, msg.value, currentNonce);
+        emit Withdraw(msg.sender, ETH, msg.value, currentNonce);
     }
 
     // Function to receive ETH

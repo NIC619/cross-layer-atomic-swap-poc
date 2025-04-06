@@ -10,6 +10,8 @@ import "hardhat/console.sol";
 contract L1Bridge is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    address public constant ETH = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+
     event Deposit(
         address indexed user,
         uint256 amount,
@@ -32,6 +34,7 @@ contract L1Bridge is ReentrancyGuard {
 
     event WithdrawalClaimed(
         address indexed user,
+        address indexed token,
         uint256 amount,
         uint256 nonce,
         bytes32 indexed withdrawMessageHash
@@ -91,6 +94,7 @@ contract L1Bridge is ReentrancyGuard {
     // Function to claim withdrawal
     function completeWithdraw(
         address user,
+        address token,
         uint256 amount,
         uint256 userL2Nonce,
         bytes32 withdrawMessageHash
@@ -99,17 +103,23 @@ contract L1Bridge is ReentrancyGuard {
         require(!claimedWithdrawals[withdrawMessageHash], "Withdrawal already claimed");
 
         // Verify the withdrawMessageHash matches the parameters
-        bytes32 expectedHash = keccak256(abi.encode(user, amount, userL2Nonce));
+        bytes32 expectedHash = keccak256(abi.encode(user, token, amount, userL2Nonce));
         require(withdrawMessageHash == expectedHash, "Invalid withdrawal parameters");
 
         // Mark as claimed
         claimedWithdrawals[withdrawMessageHash] = true;
 
         // Transfer funds
-        (bool success, ) = user.call{value: amount}("");
-        require(success, "ETH transfer failed");
+        if (token == ETH) {
+            // ETH withdrawal
+            (bool success, ) = user.call{value: amount}("");
+            require(success, "ETH transfer failed");
+        } else {
+            // ERC20 token withdrawal
+            IERC20(token).safeTransfer(user, amount);
+        }
 
-        emit WithdrawalClaimed(user, amount, userL2Nonce, withdrawMessageHash);
+        emit WithdrawalClaimed(user, token, amount, userL2Nonce, withdrawMessageHash);
     }
 
     // Placeholder function for proof verification
