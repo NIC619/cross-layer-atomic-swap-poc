@@ -1,4 +1,12 @@
 {
+  "name": "cross-layer-atomic-swap-poc",
+  "version": "0.0.1",
+  "scripts": {
+    "test": "hardhat test",
+    "compile": "hardhat compile",
+    "clean": "hardhat clean",
+    "coverage": "hardhat coverage"
+  },
   "devDependencies": {
     "@nomicfoundation/hardhat-chai-matchers": "^2.0.8",
     "@nomicfoundation/hardhat-ethers": "^3.0.8",
