@@ -1,10 +1,17 @@
 import { expect } from "chai";
 import hre from "hardhat";
-import { impersonateAccount, stopImpersonatingAccount, setBalance, loadFixture } from "@nomicfoundation/hardhat-toolbox-viem/network-helpers";
+import { impersonateAccount, stopImpersonatingAccount, setBalance, loadFixture, time } from "@nomicfoundation/hardhat-toolbox-viem/network-helpers";
 import { encodeAbiParameters, parseAbiParameters, getAddress, parseEther, keccak256 } from "viem";
 
 describe("Bridge Contracts", () => {
     describe("L1Bridge", () => {
+        let currentTimestamp: number;
+
+        before(async () => {
+            // Hardhat testnet somehow set the block timestamp to one year later so can not override it but to read and use it
+            currentTimestamp = await time.latest();
+        });
+
         async function deployL1BridgeFixture() {
             // Get signers
             const [owner, user, otherUser] = await hre.viem.getWalletClients();
@@ -57,6 +64,123 @@ describe("Bridge Contracts", () => {
                 // Check user nonce
                 const nonce = await l1Bridge.read.userNonces([user.account.address]);
                 expect(nonce).to.equal(3n);
+            });
+        });
+
+        describe("RequestSwap", () => {
+            it("should accept valid swap request, increment user nonce, and emit correct event", async () => {
+                const { l1Bridge, user, otherUser, publicClient } = await loadFixture(deployL1BridgeFixture);
+                const swapAmount = parseEther("1.0");
+                const expiry = BigInt(currentTimestamp + 3600); // 1 hour from now
+                const tokenAddress = "0x1234567890123456789012345678901234567890";
+                const expectedTokenAmount = parseEther("1000.0");
+
+                // Request swap using viem
+                const hash = await l1Bridge.write.requestSwap([
+                    expiry,
+                    otherUser.account.address,
+                    tokenAddress,
+                    expectedTokenAmount
+                ], { account: user.account.address, value: swapAmount });
+                await publicClient.waitForTransactionReceipt({ hash });
+
+                // Check user nonce
+                const nonce = await l1Bridge.read.userNonces([user.account.address]);
+                expect(nonce).to.equal(1n);
+
+                // Get the RequestSwap events
+                const requestSwapEvents = await l1Bridge.getEvents.RequestSwap();
+                expect(requestSwapEvents).to.have.lengthOf(1);
+                const event = requestSwapEvents[0];
+                expect(event.args.userA?.toLowerCase()).to.equal(user.account.address.toLowerCase());
+                expect(event.args.ETHAmount).to.equal(swapAmount);
+                expect(event.args.userB?.toLowerCase()).to.equal(otherUser.account.address.toLowerCase());
+                expect(event.args.token).to.equal(tokenAddress);
+                expect(event.args.expectedTokenAmount).to.equal(expectedTokenAmount);
+                expect(event.args.nonce).to.equal(0n);
+                expect(event.args.expiry).to.equal(expiry);
+            });
+
+            it("should reject zero swap amount", async () => {
+                const { l1Bridge, user, otherUser } = await loadFixture(deployL1BridgeFixture);
+                const expiry = BigInt(currentTimestamp + 3600);
+                const tokenAddress = "0x1234567890123456789012345678901234567890";
+                const expectedTokenAmount = parseEther("1000.0");
+
+                await expect(
+                    l1Bridge.write.requestSwap([
+                        expiry,
+                        otherUser.account.address,
+                        tokenAddress,
+                        expectedTokenAmount
+                    ], { account: user.account.address, value: 0n })
+                ).to.be.rejectedWith("Zero swap amount");
+            });
+
+            it("should reject expired timestamp", async () => {
+                const { l1Bridge, user, otherUser } = await loadFixture(deployL1BridgeFixture);
+                const swapAmount = parseEther("1.0");
+                const expiredTime = BigInt(currentTimestamp - 3600); // 1 hour ago
+                const tokenAddress = "0x1234567890123456789012345678901234567890";
+                const expectedTokenAmount = parseEther("1000.0");
+
+                await expect(
+                    l1Bridge.write.requestSwap([
+                        expiredTime,
+                        otherUser.account.address,
+                        tokenAddress,
+                        expectedTokenAmount
+                    ], { account: user.account.address, value: swapAmount })
+                ).to.be.rejectedWith("Expiry must be in the future");
+            });
+
+            it("should reject zero address for token", async () => {
+                const { l1Bridge, user, otherUser } = await loadFixture(deployL1BridgeFixture);
+                const swapAmount = parseEther("1.0");
+                const expiry = BigInt(currentTimestamp + 3600);
+                const expectedTokenAmount = parseEther("1000.0");
+
+                await expect(
+                    l1Bridge.write.requestSwap([
+                        expiry,
+                        otherUser.account.address,
+                        "0x0000000000000000000000000000000000000000",
+                        expectedTokenAmount
+                    ], { account: user.account.address, value: swapAmount })
+                ).to.be.rejectedWith("Invalid token address");
+            });
+
+            it("should reject zero expected token amount", async () => {
+                const { l1Bridge, user, otherUser } = await loadFixture(deployL1BridgeFixture);
+                const swapAmount = parseEther("1.0");
+                const expiry = BigInt(currentTimestamp + 3600);
+                const tokenAddress = "0x1234567890123456789012345678901234567890";
+
+                await expect(
+                    l1Bridge.write.requestSwap([
+                        expiry,
+                        otherUser.account.address,
+                        tokenAddress,
+                        0n
+                    ], { account: user.account.address, value: swapAmount })
+                ).to.be.rejectedWith("Zero token amount");
+            });
+
+            it("should reject self-swap", async () => {
+                const { l1Bridge, user } = await loadFixture(deployL1BridgeFixture);
+                const swapAmount = parseEther("1.0");
+                const expiry = BigInt(currentTimestamp + 3600);
+                const tokenAddress = "0x1234567890123456789012345678901234567890";
+                const expectedTokenAmount = parseEther("1000.0");
+
+                await expect(
+                    l1Bridge.write.requestSwap([
+                        expiry,
+                        user.account.address,
+                        tokenAddress,
+                        expectedTokenAmount
+                    ], { account: user.account.address, value: swapAmount })
+                ).to.be.rejectedWith("Cannot swap with yourself");
             });
         });
 

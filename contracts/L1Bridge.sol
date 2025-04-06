@@ -2,14 +2,28 @@
 pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import "hardhat/console.sol";
 
 contract L1Bridge is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     event Deposit(
         address indexed user,
         uint256 amount,
         uint256 nonce
+    );
+
+    event RequestSwap(
+        address indexed userA,
+        uint256 ETHAmount,
+        address indexed userB,
+        address indexed token,
+        uint256 expectedTokenAmount,
+        uint256 nonce,
+        uint64 expiry
     );
 
     event WithdrawalVerified(
@@ -36,6 +50,27 @@ contract L1Bridge is ReentrancyGuard {
         userNonces[msg.sender] = currentNonce + 1;
 
         emit Deposit(msg.sender, msg.value, currentNonce);
+    }
+
+    // Function to request an atomic swap
+    function requestSwap(
+        uint64 expiry,
+        address userB,
+        address token,
+        uint256 expectedTokenAmount
+    ) external payable nonReentrant {
+        console.log("Expiry", expiry);
+        console.log("Current time", block.timestamp);
+        require(msg.value > 0, "Zero swap amount");
+        require(expiry > block.timestamp, "Expiry must be in the future");
+        require(token != address(0), "Invalid token address");
+        require(expectedTokenAmount > 0, "Zero token amount");
+        require(userB != msg.sender, "Cannot swap with yourself");
+
+        uint256 currentNonce = userNonces[msg.sender];
+        userNonces[msg.sender] = currentNonce + 1;
+
+        emit RequestSwap(msg.sender, msg.value, userB, token, expectedTokenAmount, currentNonce, expiry);
     }
 
     // Function to prove and register withdrawals
