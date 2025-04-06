@@ -26,6 +26,34 @@ interface RequestSwapCompletedEvent {
     };
 }
 
+interface SwapFilledEvent {
+    eventName: 'SwapFilled';
+    args: {
+        userA: string;
+        ETHAmount: bigint;
+        userB: string;
+        token: string;
+        expectedTokenAmount: bigint;
+        nonce: bigint;
+        expiry: number;
+        messageHash: string;
+    };
+}
+
+interface SwapCancelledEvent {
+    eventName: 'SwapCancelled';
+    args: {
+        userA: string;
+        ETHAmount: bigint;
+        userB: string;
+        token: string;
+        expectedTokenAmount: bigint;
+        nonce: bigint;
+        expiry: number;
+        messageHash: string;
+    };
+}
+
 export class Sequencer {
     /** L2Bridge contract instance */
     private l2Bridge: any;
@@ -162,8 +190,81 @@ export class Sequencer {
             this.l1Monitor.clearSwaps();
         }
 
-        if (pendingDeposits.length === 0 && pendingSwaps.length === 0) {
-            console.log("Sequencer: No pending deposits or swaps to process");
+        // Check for expired swaps and cancel them
+        const expiredSwaps = this.l1Monitor.getExpiredSwaps();
+        if (expiredSwaps.length > 0) {
+            console.log(`Sequencer: Found ${expiredSwaps.length} expired swaps to cancel`);
+
+            for (const swap of expiredSwaps) {
+                try {
+                    console.log(`Sequencer: Cancelling expired swap for userA ${swap.userA}`);
+                    const hash = await this.l2Bridge.write.cancelExpiredSwap([
+                        swap.userA,
+                        swap.ETHAmount,
+                        swap.userB,
+                        swap.token,
+                        swap.expectedTokenAmount,
+                        swap.nonce,
+                        swap.expiry
+                    ]);
+
+                    const receipt = await this.l2Client.waitForTransactionReceipt({ hash });
+                    // Check for SwapCancelled event in the receipt
+                    const swapCancelledEvent = receipt.logs.find((log: Log) => {
+                        try {
+                            const decodedLog = decodeEventLog({
+                                abi: this.l2Bridge.abi,
+                                data: log.data,
+                                topics: log.topics,
+                            }) as unknown as SwapCancelledEvent;
+                            return decodedLog.eventName === "SwapCancelled";
+                        } catch (error) {
+                            return false;
+                        }
+                    });
+
+                    if (swapCancelledEvent) {
+                        console.log(`Sequencer: SwapCancelled event found for userA ${swap.userA}`);
+                        // Remove the swap from unfilled swaps list
+                        this.l1Monitor.removeUnfilledSwap(swap.messageHash);
+                    } else {
+                        console.warn(`Sequencer: No SwapCancelled event found for userA ${swap.userA}`);
+                    }
+                } catch (error) {
+                    console.error(`Sequencer: Error cancelling expired swap for userA ${swap.userA}:`, error);
+                }
+            }
+        }
+
+        // Watch for SwapFilled events to update unfilled swaps list
+        this.l2Client.watchContractEvent({
+            address: this.l2Bridge.address,
+            abi: this.l2Bridge.abi,
+            eventName: "SwapFilled",
+            onLogs: async (logs: Log[]) => {
+                for (const log of logs) {
+                    try {
+                        const decodedLog = decodeEventLog({
+                            abi: this.l2Bridge.abi,
+                            data: log.data,
+                            topics: log.topics,
+                        }) as SwapFilledEvent;
+                        
+                        if (decodedLog.eventName === "SwapFilled") {
+                            const messageHash = decodedLog.args.messageHash as `0x${string}`;
+                            // Remove the filled swap from unfilled swaps list
+                            this.l1Monitor.removeUnfilledSwap(messageHash);
+                            console.log(`Sequencer: SwapFilled event detected, removed swap from unfilled list`);
+                        }
+                    } catch (error) {
+                        console.error("Sequencer: Error processing SwapFilled event:", error);
+                    }
+                }
+            },
+        });
+
+        if (pendingDeposits.length === 0 && pendingSwaps.length === 0 && expiredSwaps.length === 0) {
+            console.log("Sequencer: No pending deposits, swaps, or expired swaps to process");
         }
     }
 } 

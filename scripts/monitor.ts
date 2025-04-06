@@ -48,6 +48,7 @@ export class L1Monitor {
   private l1BridgeAddress: `0x${string}`;
   private deposits: Deposit[] = [];
   private swaps: Swap[] = [];
+  private unfilledSwaps: Swap[] = []; // Track unfilled swaps
   private isMonitoring: boolean = false;
 
   constructor(l1Client: PublicClient, l1BridgeAddress: `0x${string}`) {
@@ -141,6 +142,8 @@ export class L1Monitor {
             ) as `0x${string}`
           };
           this.swaps.push(swap);
+          // Add to unfilled swaps list
+          this.unfilledSwaps.push(swap);
           console.log(
             `L1Monitor: New swap detected - UserA: ${swap.userA}, ETHAmount: ${swap.ETHAmount}, UserB: ${swap.userB}, Token: ${swap.token}, ExpectedTokenAmount: ${swap.expectedTokenAmount}, Nonce: ${swap.nonce}, Expiry: ${swap.expiry}`
           );
@@ -160,6 +163,21 @@ export class L1Monitor {
 
   getPendingSwaps(): Swap[] {
     return [...this.swaps];
+  }
+
+  getUnfilledSwaps(): Swap[] {
+    return [...this.unfilledSwaps];
+  }
+
+  // Remove a swap from the unfilled swaps list (when it's filled)
+  removeUnfilledSwap(messageHash: `0x${string}`) {
+    this.unfilledSwaps = this.unfilledSwaps.filter(swap => swap.messageHash !== messageHash);
+  }
+
+  // Get expired swaps that need to be cancelled
+  getExpiredSwaps(): Swap[] {
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    return this.unfilledSwaps.filter(swap => swap.expiry < currentTimestamp);
   }
 
   clearDeposits() {
