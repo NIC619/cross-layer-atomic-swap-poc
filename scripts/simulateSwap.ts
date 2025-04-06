@@ -1,316 +1,428 @@
 import hre from "hardhat";
-import { loadFixture, impersonateAccount, stopImpersonatingAccount, setBalance } from "@nomicfoundation/hardhat-toolbox-viem/network-helpers";
-import { parseEther, keccak256, encodeAbiParameters, parseAbiParameters, createPublicClient, http, createWalletClient, Log, decodeEventLog } from "viem";
+import { createPublicClient, createWalletClient, http, parseEther, parseEventLogs } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { foundry } from "viem/chains";
+import { L1Monitor } from "./monitor";
+import { Sequencer } from "./sequencer";
 
-// Types for our simulation
-interface Deposit {
-    user: string;
-    amount: bigint;
-    nonce: bigint;
-    messageHash: `0x${string}`;
-}
+// Create a public client for L1
+const l1Client = createPublicClient({
+    chain: foundry,
+    transport: http("http://127.0.0.1:8545"),
+});
 
-interface DepositEvent {
-    eventName: 'Deposit';
-    args: {
-        user: string;
-        amount: bigint;
-        nonce: bigint;
-    };
-}
+// Create a public client for L2
+const l2Client = createPublicClient({
+    chain: foundry,
+    transport: http("http://127.0.0.1:8546"),
+});
 
-class L1Monitor {
-    private deposits: Deposit[] = [];
-    private l1Bridge: any;
-    private publicClient: any;
-    private unwatch: (() => void) | null = null;
+// Create a wallet client for the user
+const userAAccount = privateKeyToAccount(
+    "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+);
+const userAWalletClient = createWalletClient({
+    account: userAAccount,
+    chain: foundry,
+    transport: http("http://127.0.0.1:8545"),
+});
 
-    constructor(l1Bridge: any, publicClient: any) {
-        this.l1Bridge = l1Bridge;
-        this.publicClient = publicClient;
-    }
+// Create a wallet client for userB on L2
+const userBAccount = privateKeyToAccount(
+    "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+);
+const userBWalletClient = createWalletClient({
+    account: userBAccount,
+    chain: foundry,
+    transport: http("http://127.0.0.1:8546"),
+});
 
-    async startMonitoring() {
-        console.log("L1Monitor: Starting to monitor L1 deposits...");
-        console.log("L1Monitor: Watching address:", this.l1Bridge.address);
-        
-        // Watch for Deposit events using the public client
-        this.unwatch = this.publicClient.watchContractEvent({
-            address: this.l1Bridge.address,
-            abi: this.l1Bridge.abi,
-            eventName: 'Deposit',
-            onLogs: async (logs: Log[]) => {
-                for (const log of logs) {
-                    const decodedLog = decodeEventLog({
-                        abi: this.l1Bridge.abi,
-                        data: log.data,
-                        topics: log.topics,
-                    }) as DepositEvent;
-                    
-                    const deposit: Deposit = {
-                        user: decodedLog.args.user,
-                        amount: decodedLog.args.amount,
-                        nonce: decodedLog.args.nonce,
-                        messageHash: keccak256(
-                            encodeAbiParameters(
-                                parseAbiParameters("address, uint256, uint256"),
-                                [decodedLog.args.user as `0x${string}`, decodedLog.args.amount, decodedLog.args.nonce]
-                            )
-                        ) as `0x${string}`
-                    };
-                    this.deposits.push(deposit);
-                    console.log(`L1Monitor: New deposit detected - User: ${deposit.user}, Amount: ${deposit.amount}, Nonce: ${deposit.nonce}`);
-                }
-            }
-        });
-        console.log("L1Monitor: Event watching started");
-    }
+// Create a wallet client for the sequencer
+const sequencerAccount = privateKeyToAccount(
+    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+);
+const sequencerL1WalletClient = createWalletClient({
+    account: sequencerAccount,
+    chain: foundry,
+    transport: http("http://127.0.0.1:8545"),
+});
+const sequencerL2WalletClient = createWalletClient({
+    account: sequencerAccount,
+    chain: foundry,
+    transport: http("http://127.0.0.1:8546"),
+});
 
-    stopMonitoring() {
-        if (this.unwatch) {
-            this.unwatch();
-            this.unwatch = null;
-        }
-    }
-
-    getPendingDeposits(): Deposit[] {
-        return this.deposits;
-    }
-
-    clearDeposits() {
-        this.deposits = [];
-    }
-}
-
-class Sequencer {
-    private l2Bridge: any;
-    private l1Bridge: any;
-    private l1Monitor: L1Monitor;
-    private publicClient: any;
-    private isRunning: boolean = false;
-    private intervalId: NodeJS.Timeout | null = null;
-
-    constructor(l2Bridge: any, l1Bridge: any, l1Monitor: L1Monitor, publicClient: any) {
-        this.l2Bridge = l2Bridge;
-        this.l1Bridge = l1Bridge;
-        this.l1Monitor = l1Monitor;
-        this.publicClient = publicClient;
-    }
-
-    async start() {
-        this.isRunning = true;
-        console.log("Sequencer: Starting to produce L2 blocks...");
-        
-        // Run the sequencer in the background using setInterval
-        this.intervalId = setInterval(async () => {
-            if (!this.isRunning) {
-                if (this.intervalId) {
-                    clearInterval(this.intervalId);
-                    this.intervalId = null;
-                }
-                return;
-            }
-            await this.produceBlock();
-        }, 1000); // Run every 1 second
-    }
-
-    stop() {
-        this.isRunning = false;
-        if (this.intervalId) {
-            clearInterval(this.intervalId);
-            this.intervalId = null;
-        }
-        console.log("Sequencer: Stopping block production...");
-    }
-
-    private async produceBlock() {
-        const pendingDeposits = this.l1Monitor.getPendingDeposits();
-        if (pendingDeposits.length === 0) {
-            console.log("Sequencer: No pending deposits to process");
-            return;
-        }
-
-        console.log(`Sequencer: Processing ${pendingDeposits.length} deposits in new block`);
-
-        // Process each deposit
-        for (const deposit of pendingDeposits) {
-            try {
-                const hash = await this.l2Bridge.write.completeDeposit([
-                    deposit.user,
-                    deposit.amount,
-                    deposit.nonce
-                ], { value: deposit.amount });
-
-                const receipt = await this.publicClient.waitForTransactionReceipt({ hash });
-                // Check for DepositCompleted event in the receipt
-                const depositCompletedEvent = receipt.logs.find((log: Log) => {
-                    try {
-                        const decodedLog = decodeEventLog({
-                            abi: this.l2Bridge.abi,
-                            data: log.data,
-                            topics: log.topics,
-                        }) as { eventName: string };
-                        return decodedLog.eventName === 'DepositCompleted';
-                    } catch (error) {
-                        return false;
-                    }
-                });
-
-                if (depositCompletedEvent) {
-                    console.log(`Sequencer: DepositCompleted event found for user ${deposit.user}`);
-                } else {
-                    console.warn(`Sequencer: No DepositCompleted event found for user ${deposit.user}`);
-                }
-            } catch (error) {
-                console.error(`Sequencer: Error processing deposit for user ${deposit.user}:`, error);
-            }
-        }
-
-        // Clear processed deposits
-        this.l1Monitor.clearDeposits();
-    }
-}
-
-async function deployContracts(
-    l1Client: any,
-    l2Client: any,
-    l1Wallet: any,
-    l2Wallet: any
-): Promise<{ l1Bridge: any; l2Bridge: any }> {
-    // Deploy L1Bridge to L1 network
-    console.log("Deploying L1Bridge to L1 network...");
-    const l1Bridge = await hre.viem.deployContract("L1Bridge", [], {
-        client: { public: l1Client, wallet: l1Wallet }
+// Function to deploy contracts
+async function deployContracts() {
+    console.log("Deploying L1Bridge...");
+    const l1BridgeDeployed = await hre.viem.deployContract("L1Bridge", [], {
+        client: { public: l1Client, wallet: sequencerL1WalletClient }
     });
+    console.log("L1Bridge deployed at:", l1BridgeDeployed.address);
 
-    // Verify L1Bridge deployment
-    const l1BridgeCode = await l1Client.getCode({ address: l1Bridge.address });
-    if (l1BridgeCode !== undefined) {
-        console.log("L1Bridge deployed at:", l1Bridge.address);
-    } else {
-        console.log("L1Bridge deployment failed");
-        process.exit(1);
-    }
-
-    // Deploy L2Bridge to L2 network
-    console.log("\nDeploying L2Bridge to L2 network...");
-    const l2Bridge = await hre.viem.deployContract("L2Bridge", [l1Bridge.address], {
-        client: { public: l2Client, wallet: l2Wallet }
+    console.log("Deploying L2Bridge...");
+    const l2BridgeDeployed = await hre.viem.deployContract("L2Bridge", [
+        l1BridgeDeployed.address
+    ], {
+        client: { public: l2Client, wallet: sequencerL2WalletClient }
     });
+    console.log("L2Bridge deployed at:", l2BridgeDeployed.address);
 
-    // Verify L2Bridge deployment
-    const l2BridgeCode = await l2Client.getCode({ address: l2Bridge.address });
-    if (l2BridgeCode !== undefined) {
-        console.log("L2Bridge deployed at:", l2Bridge.address);
-    } else {
-        console.log("L2Bridge deployment failed");
-        process.exit(1);
-    }
+    console.log("Deploying ERC20 Token...");
+    const tokenDeployed = await hre.viem.deployContract("MockERC20", ["Mock Token", "MTK", 18], {
+        client: { public: l2Client, wallet: sequencerL2WalletClient }
+    });
+    console.log("ERC20 Token deployed at:", tokenDeployed.address);
 
-    return { l1Bridge, l2Bridge };
+    const l1Bridge = await hre.viem.getContractAt("L1Bridge", l1BridgeDeployed.address, {
+        client: { public: l2Client, wallet: userAWalletClient }
+    });
+    const l2Bridge = await hre.viem.getContractAt("L2Bridge", l2BridgeDeployed.address, {
+        client: { public: l2Client, wallet: userBWalletClient }
+    });
+    const token = await hre.viem.getContractAt("MockERC20", tokenDeployed.address, {
+        client: { public: l2Client, wallet: userBWalletClient }
+    });
+    return { l1Bridge, l2Bridge, token };
 }
 
+// Function to simulate a deposit
 async function simulateDeposit(
     l1Client: any,
     l1Bridge: any,
-    user: any,
-    depositAmount: bigint
+    userA: any,
+    amount: bigint
 ) {
-    // Create a new wallet client for the user account
-    const userWallet = createWalletClient({
-        account: user,
-        chain: foundry,
-        transport: http("http://localhost:8545")
-    });
+    console.log("Simulating deposit...");
+    console.log("UserA address:", userA.address);
+    console.log("Deposit amount:", amount.toString());
 
     // Check user's balance
-    const userBalance = await l1Client.getBalance({ address: user.address });
-    // Set user's balance if needed
-    if (userBalance < depositAmount) {
+    const balance = await l1Client.getBalance({ address: userA.address });
+    console.log("UserA balance before deposit:", balance.toString());
+
+    // If balance is less than amount, set it
+    if (balance < amount) {
         console.log("Setting user balance...");
-        await setBalance(user.address, parseEther("10.0"));
-        const newBalance = await l1Client.getBalance({ address: user.address });
-        console.log("User balance after setting:", newBalance);
+        await l1Client.setBalance({
+            address: userA.address,
+            value: amount,
+        });
+        console.log("UserA balance set to:", amount.toString());
     }
 
-    // Make a deposit using the user's wallet client
-    try {
-        const depositHash = await userWallet.writeContract({
-            address: l1Bridge.address,
-            abi: l1Bridge.abi,
-            functionName: 'deposit',
-            args: [],
-            value: depositAmount,
-            account: user
-        });
+    // Make the deposit
+    console.log("Making deposit...");
+    const hash = await l1Bridge.write.deposit([], { value: amount });
+    console.log("Deposit transaction hash:", hash);
 
-        const receipt = await l1Client.waitForTransactionReceipt({ hash: depositHash });
-        console.log(`Made deposit of ${depositAmount} from ${user.address}`);
-    } catch (error) {
-        console.error("Error making deposit:", error);
+    // Wait for the transaction to be mined
+    const receipt = await l1Client.waitForTransactionReceipt({ hash });
+    //   console.log("Deposit transaction receipt:", receipt);
+
+    // Check user's balance after deposit
+    const newBalance = await l1Client.getBalance({ address: userA.address });
+    console.log("UserA balance after deposit:", newBalance.toString());
+
+    return receipt;
+}
+
+// Function to simulate a swap request
+async function simulateRequestSwap(
+    l1Client: any,
+    l1Bridge: any,
+    userA: any,
+    ETHAmount: bigint,
+    userB: string,
+    token: string,
+    expectedTokenAmount: bigint,
+    expiry: number
+) {
+    console.log("Simulating swap request...");
+    console.log("UserA address:", userA.address);
+    console.log("Swap ETH amount:", ETHAmount.toString());
+    console.log("UserB address:", userB);
+    console.log("Token address:", token);
+    console.log("Expected token amount:", expectedTokenAmount.toString());
+    console.log("Swap expiry:", expiry);
+
+    // Check user's balance
+    const balance = await l1Client.getBalance({ address: userA.address });
+    console.log("UserA balance before swap request:", balance.toString());
+
+    // If balance is less than amount, set it
+    if (balance < ETHAmount) {
+        console.log("Setting user balance...");
+        await l1Client.setBalance({
+            address: userA.address,
+            value: ETHAmount,
+        });
+        console.log("UserA balance set to:", ETHAmount.toString());
+    }
+
+    // Make the swap request
+    console.log("Making swap request...");
+    const hash = await l1Bridge.write.requestSwap([
+        expiry,
+        userB,
+        token,
+        expectedTokenAmount
+    ], { value: ETHAmount });
+    console.log("Swap request transaction hash:", hash);
+
+    // Wait for the transaction to be mined
+    const receipt = await l1Client.waitForTransactionReceipt({ hash });
+    //   console.log("Swap request transaction receipt:", receipt);
+
+    // Check user's balance after swap request
+    const newBalance = await l1Client.getBalance({ address: userA.address });
+    console.log("UserA balance after swap request:", newBalance.toString());
+
+    return receipt;
+}
+
+// Function to fill a swap
+async function fillSwap(
+    l2Client: any,
+    l2Bridge: any,
+    userB: any,
+    userA: string,
+    ETHAmount: bigint,
+    token: string,
+    expectedTokenAmount: bigint,
+    nonce: number,
+    expiry: number
+) {
+    console.log("Filling swap...");
+    console.log("UserA address:", userA);
+    console.log("UserB address:", userB.address);
+    console.log("Swap ETH amount:", ETHAmount.toString());
+    console.log("Token address:", token);
+    console.log("Expected token amount:", expectedTokenAmount.toString());
+    console.log("Swap nonce:", nonce);
+    console.log("Swap expiry:", expiry);
+
+    // Check userB's balance
+    const balance = await l2Client.getBalance({ address: userB.address });
+    console.log("UserB balance before fill:", balance.toString());
+
+    // Make the fillSwap call
+    console.log("Making fillSwap call...");
+    const hash = await l2Bridge.write.fillSwap([
+        userA,
+        ETHAmount,
+        userB.address,
+        token,
+        expectedTokenAmount,
+        nonce,
+        expiry,
+    ]);
+    console.log("FillSwap transaction hash:", hash);
+
+    // Wait for the transaction to be mined
+    const receipt = await l2Client.waitForTransactionReceipt({ hash });
+
+    // Check userB's balance after fill
+    const newBalance = await l2Client.getBalance({ address: userB.address });
+    console.log("UserB balance after fill:", newBalance.toString());
+
+    return receipt;
+}
+
+// Function to mint tokens to userB
+async function mintTokensToUserB(
+    l2Client: any,
+    token: any,
+    userB: any,
+    amount: bigint
+) {
+    console.log("Minting tokens to userB...");
+    console.log("UserB address:", userB.address);
+    console.log("Token amount:", amount.toString());
+
+    // Mint tokens to userB
+    console.log("Minting tokens...");
+    const hash = await token.write.mint([userB.address, amount]);
+    console.log("Mint transaction hash:", hash);
+
+    // Wait for the transaction to be mined
+    const receipt = await l2Client.waitForTransactionReceipt({ hash });
+
+    // Check userB's token balance
+    const balance = await token.read.balanceOf([userB.address]);
+    console.log("UserB token balance:", balance.toString());
+
+    return receipt;
+}
+
+// Function to parse the RequestSwap event from a transaction receipt
+async function parseRequestSwapEvent(
+    l1Client: any,
+    l1Bridge: any,
+    receipt: any
+) {
+    console.log("Parsing RequestSwap event from transaction receipt...");
+    
+    // Use parseEventLogs to find and decode the RequestSwap event
+    const parsedLogs = parseEventLogs({
+        abi: l1Bridge.abi,
+        eventName: 'RequestSwap',
+        logs: receipt.logs,
+    });
+    
+    if (parsedLogs.length === 0) {
+        throw new Error("RequestSwap event not found in transaction logs");
+    }
+    
+    // Get the first RequestSwap event
+    const requestSwapEvent = parsedLogs[0] as any;
+    
+    // Extract the event parameters
+    return {
+        userA: requestSwapEvent.args?.userA || requestSwapEvent.userA,
+        ETHAmount: requestSwapEvent.args?.ETHAmount || requestSwapEvent.ETHAmount,
+        userB: requestSwapEvent.args?.userB || requestSwapEvent.userB,
+        token: requestSwapEvent.args?.token || requestSwapEvent.token,
+        expectedTokenAmount: requestSwapEvent.args?.expectedTokenAmount || requestSwapEvent.expectedTokenAmount,
+        nonce: requestSwapEvent.args?.nonce || requestSwapEvent.nonce,
+        expiry: requestSwapEvent.args?.expiry || requestSwapEvent.expiry,
+    };
+}
+
+// Function to approve token transfer to L2Bridge
+async function approveTokenTransfer(
+    l2Client: any,
+    token: any,
+    userB: any,
+    l2Bridge: any,
+    amount: bigint
+) {
+    console.log("Approving token transfer to L2Bridge...");
+    console.log("UserB address:", userB.address);
+    console.log("L2Bridge address:", l2Bridge.address);
+    console.log("Token amount:", amount.toString());
+
+    // Check current allowance
+    const currentAllowance = await token.read.allowance([userB.address, l2Bridge.address]);
+    console.log("Current allowance:", currentAllowance.toString());
+
+    // If allowance is less than amount, approve
+    if (currentAllowance < amount) {
+        console.log("Approving token transfer...");
+        const hash = await token.write.approve([l2Bridge.address, amount]);
+        console.log("Approve transaction hash:", hash);
+
+        // Wait for the transaction to be mined
+        const receipt = await l2Client.waitForTransactionReceipt({ hash });
+
+        // Check new allowance
+        const newAllowance = await token.read.allowance([userB.address, l2Bridge.address]);
+        console.log("New allowance:", newAllowance.toString());
+
+        return receipt;
+    } else {
+        console.log("Sufficient allowance already exists");
+        return null;
     }
 }
 
+// Main function
 async function main() {
-    // Create clients for L1 and L2 networks
-    const l1Client = createPublicClient({
-        chain: foundry,
-        transport: http("http://localhost:8545")
-    });
-
-    const l2Client = createPublicClient({
-        chain: foundry,
-        transport: http("http://localhost:8546")
-    });
-
-    // Create accounts for deployment
-    const l1Deployer = privateKeyToAccount("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"); // Account #0 on local testnet
-    const l2Deployer = privateKeyToAccount("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"); // Account #1 on local testnet
-    const user = privateKeyToAccount("0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"); // Account #2 on local testnet
-
-    // Create wallet clients
-    const l1Wallet = createWalletClient({
-        account: l1Deployer,
-        chain: foundry,
-        transport: http("http://localhost:8545")
-    });
-
-    const l2Wallet = createWalletClient({
-        account: l2Deployer,
-        chain: foundry,
-        transport: http("http://localhost:8546")
-    });
-
     // Deploy contracts
-    const { l1Bridge, l2Bridge } = await deployContracts(l1Client, l2Client, l1Wallet, l2Wallet);
+    const { l1Bridge, l2Bridge, token } = await deployContracts();
 
-    // Initialize monitor and sequencer
-    const l1Monitor = new L1Monitor(l1Bridge, l1Client);
-    const sequencer = new Sequencer(l2Bridge, l1Bridge, l1Monitor, l2Client);
+    // Create monitors and sequencer
+    const l1Monitor = new L1Monitor(l1Client, l1Bridge.address);
+    const sequencer = new Sequencer(
+        l2Client,
+        l2Bridge.address,
+        sequencerL2WalletClient,
+        l1Monitor
+    );
 
     // Start monitoring and sequencer
-    console.log("\nStarting monitoring and sequencer...");
+    console.log("Starting L1Monitor...");
     await l1Monitor.startMonitoring();
-    await sequencer.start(); // This will now run in the background
+    console.log("Starting Sequencer...");
+    await sequencer.start();
 
-    // Simulate some deposits
-    console.log("\nPreparing to make deposit...");
+    // Simulate a deposit
     const depositAmount = parseEther("1.0");
-    await simulateDeposit(l1Client, l1Bridge, user, depositAmount);
+    const depositReceipt = await simulateDeposit(
+        l1Client,
+        l1Bridge,
+        userAAccount,
+        depositAmount
+    );
 
-    // Wait for processing
-    console.log("\nWaiting for processing...");
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    // Wait for the deposit to be processed
+    console.log("Waiting for deposit to be processed...");
+    await new Promise((resolve) => setTimeout(resolve, 5000));
 
-    // Stop the simulation
-    console.log("\nStopping simulation...");
+    // Mint tokens to userB
+    const tokenAmount = parseEther("1000"); // Mint 1000 tokens to userB
+    const mintReceipt = await mintTokensToUserB(
+        l2Client,
+        token,
+        userBAccount,
+        tokenAmount
+    );
+
+    // Simulate a swap request
+    const swapETHAmount = parseEther("0.5");
+    const userBAddress = userBAccount.address; // Use userB's address for the swap
+    const tokenAddress = token.address; // Use the deployed token address
+    const expectedTokenAmount = parseEther("100"); // Example token amount
+    const expiry = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
+    const swapReceipt = await simulateRequestSwap(
+        l1Client,
+        l1Bridge,
+        userAAccount,
+        swapETHAmount,
+        userBAddress,
+        tokenAddress,
+        expectedTokenAmount,
+        expiry
+    );
+
+    // Wait for the swap request to be processed by the sequencer
+    console.log("Waiting for swap request to be processed by sequencer...");
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+
+    // Parse the RequestSwap event from the transaction receipt
+    const swapParams = await parseRequestSwapEvent(l1Client, l1Bridge, swapReceipt);
+    console.log("Swap parameters from event:", swapParams);
+
+    // Approve token transfer to L2Bridge
+    const approveReceipt = await approveTokenTransfer(
+        l2Client,
+        token,
+        userBAccount,
+        l2Bridge,
+        swapParams.expectedTokenAmount
+    );
+
+    // Fill the swap with userB using parameters from the event
+    const fillReceipt = await fillSwap(
+        l2Client,
+        l2Bridge,
+        userBAccount,
+        swapParams.userA,
+        swapParams.ETHAmount,
+        swapParams.token,
+        swapParams.expectedTokenAmount,
+        swapParams.nonce,
+        swapParams.expiry
+    );
+
+    // Stop monitoring and sequencer
+    console.log("Stopping L1Monitor...");
     l1Monitor.stopMonitoring();
+    console.log("Stopping Sequencer...");
     sequencer.stop();
 }
 
 main().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
+    console.error("Error in main function:", error);
+    process.exit(1);
 });
