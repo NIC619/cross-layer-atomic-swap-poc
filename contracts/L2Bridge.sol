@@ -45,6 +45,17 @@ contract L2Bridge is ReentrancyGuard {
         bytes32 indexed messageHash
     );
 
+    event SwapCancelled(
+        address indexed userA,
+        uint256 ETHAmount,
+        address indexed userB,
+        address token,
+        uint256 expectedTokenAmount,
+        uint256 nonce,
+        uint64 expiry,
+        bytes32 indexed messageHash
+    );
+
     event Withdraw(
         address indexed user,
         address indexed token,
@@ -199,6 +210,47 @@ contract L2Bridge is ReentrancyGuard {
         userNonces[msg.sender] = currentNonce + 1;
 
         emit Withdraw(msg.sender, ETH, msg.value, currentNonce);
+    }
+
+    /**
+     * @dev Allows userA to cancel an expired swap and withdraw their ETH
+     * @param userA Address of the user who initiated the swap on L1Bridge
+     * @param ETHAmount Amount of ETH for the swap
+     * @param userB Address of the counterparty for the swap (can be zero address)
+     * @param token Address of the ERC20 token
+     * @param expectedTokenAmount Amount of ERC20 tokens for the swap
+     * @param nonce User's nonce on L1Bridge
+     * @param expiry Timestamp when the swap expires
+     */
+    function cancelExpiredSwap(
+        address userA,
+        uint256 ETHAmount,
+        address userB,
+        address token,
+        uint256 expectedTokenAmount,
+        uint256 nonce,
+        uint64 expiry
+    ) external nonReentrant {
+        // Compute the message hash
+        bytes32 messageHash = keccak256(abi.encode(userA, ETHAmount, userB, token, expectedTokenAmount, nonce, expiry));
+
+        // Check if the swap exists and is open
+        require(swapStatus[messageHash] == SwapStatus.Open, "Swap not found or not open");
+
+        // Check if the swap has expired
+        require(block.timestamp > expiry, "Swap has not expired yet");
+
+        // Mark the swap as expired
+        swapStatus[messageHash] = SwapStatus.Expired;
+
+        emit SwapCancelled(userA, ETHAmount, userB, token, expectedTokenAmount, nonce, expiry, messageHash);
+
+        // Initiate withdrawal of ETH back to userA on L1
+        // Get current nonce for the withdrawal
+        uint256 currentNonce = userNonces[userA];
+        userNonces[userA] = currentNonce + 1;
+
+        emit Withdraw(userA, ETH, ETHAmount, currentNonce);
     }
 
     // Function to receive ETH

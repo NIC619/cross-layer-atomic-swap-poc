@@ -747,12 +747,6 @@ describe("Bridge Contracts", () => {
             let tokenAddress: `0x${string}` = "0x0000000000000000000000000000000000000000" as `0x${string}`;
             let messageHash: string;
 
-            // before(async () => {
-            //     // Deploy a mock ERC20 token
-            //     mockToken = await hre.viem.deployContract("MockERC20", ["Mock Token", "MTK", 18]);
-            //     tokenAddress = mockToken.address as `0x${string}`;
-            // });
-
             interface L2BridgeWithTokenAndSwapFixture {
                 l1Bridge: any;
                 l2Bridge: any;
@@ -1042,6 +1036,234 @@ describe("Bridge Contracts", () => {
                 // Check swap status is Filled
                 const swapStatus = await l2Bridge.read.swapStatus([zeroUserBMessageHash]);
                 expect(swapStatus).to.equal(2n); // 2 = Filled
+            });
+        });
+
+        describe("CancelExpiredSwap", () => {
+            const swapAmount = parseEther("1.0");
+            const expectedTokenAmount = parseEther("1000.0");
+            const userNonce = 0n;
+            let mockToken: any;
+            let tokenAddress: `0x${string}` = "0x0000000000000000000000000000000000000000" as `0x${string}`;
+            let messageHash: string;
+
+            interface L2BridgeWithExpiredSwapFixture {
+                l1Bridge: any;
+                l2Bridge: any;
+                mockToken: any;
+                owner: any;
+                userA: any;
+                userB: any;
+                publicClient: any;
+                expiry: bigint;
+            }
+
+            async function deployL2BridgeWithExpiredSwapFixture(): Promise<L2BridgeWithExpiredSwapFixture> {
+                const fixture = await loadFixture(deployL2BridgeFixture);
+                const { l1Bridge, l2Bridge, owner, userA, userB, publicClient } = fixture;
+                const expiry = BigInt(currentTimestamp - 3600); // 1 hour ago (expired)
+
+                // Set contract balance directly for ETH swaps
+                await setBalance(l2Bridge.address, swapAmount);
+
+                // Deploy a mock ERC20 token
+                mockToken = await hre.viem.deployContract("MockERC20", ["Mock Token", "MTK", 18]);
+                tokenAddress = mockToken.address as `0x${string}`;
+
+                // Complete request swap
+                await impersonateAccount(l1Bridge.address);
+                await setBalance(l1Bridge.address, parseEther("10.0"));
+
+                const hash = await l2Bridge.write.completeRequestSwap([
+                    userA.account.address,
+                    swapAmount,
+                    userB.account.address,
+                    tokenAddress,
+                    expectedTokenAmount,
+                    userNonce,
+                    expiry
+                ], { account: l1Bridge.address });
+                await publicClient.waitForTransactionReceipt({ hash });
+
+                await stopImpersonatingAccount(l1Bridge.address);
+
+                // Compute the message hash
+                messageHash = keccak256(
+                    encodeAbiParameters(
+                        parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
+                        [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, expiry]
+                    )
+                );
+
+                return {
+                    l1Bridge,
+                    l2Bridge,
+                    mockToken,
+                    owner,
+                    userA,
+                    userB,
+                    publicClient,
+                    expiry
+                };
+            }
+
+            it("should cancel expired swap and initiate ETH withdrawal", async () => {
+                const fixture = await loadFixture(deployL2BridgeWithExpiredSwapFixture);
+                const { l2Bridge, userA, userB, publicClient, expiry } = fixture;
+
+                // Get initial nonce
+                const initialNonce = await l2Bridge.read.userNonces([userA.account.address]);
+
+                // Cancel expired swap
+                const hash = await l2Bridge.write.cancelExpiredSwap([
+                    userA.account.address,
+                    swapAmount,
+                    userB.account.address,
+                    tokenAddress,
+                    expectedTokenAmount,
+                    userNonce,
+                    expiry
+                ], { account: userA.account.address });
+                await publicClient.waitForTransactionReceipt({ hash });
+
+                // Check swap status is Expired
+                const swapStatus = await l2Bridge.read.swapStatus([messageHash]);
+                expect(swapStatus).to.equal(3n); // 3 = Expired
+
+                // Check SwapCancelled event
+                const events = await l2Bridge.getEvents.SwapCancelled();
+                expect(events).to.have.lengthOf(1);
+                const event = events[0];
+                expect(event.args.userA?.toLowerCase()).to.equal(userA.account.address.toLowerCase());
+                expect(event.args.ETHAmount).to.equal(swapAmount);
+                expect(event.args.userB?.toLowerCase()).to.equal(userB.account.address.toLowerCase());
+                expect(event.args.token.toLowerCase()).to.equal(tokenAddress.toLowerCase());
+                expect(event.args.expectedTokenAmount).to.equal(expectedTokenAmount);
+                expect(event.args.nonce).to.equal(userNonce);
+                expect(event.args.expiry).to.equal(expiry);
+                expect(event.args.messageHash).to.equal(messageHash);
+
+                // Check Withdraw event for userA
+                const withdrawEvents = await l2Bridge.getEvents.Withdraw();
+                expect(withdrawEvents).to.have.lengthOf(1);
+                const withdrawEvent = withdrawEvents[0];
+                expect(withdrawEvent.args.user?.toLowerCase()).to.equal(userA.account.address.toLowerCase());
+                expect(withdrawEvent.args.token.toLowerCase()).to.equal(getAddress("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE").toLowerCase());
+                expect(withdrawEvent.args.amount).to.equal(swapAmount);
+                expect(withdrawEvent.args.nonce).to.equal(initialNonce);
+
+                // Check nonce was incremented
+                const finalNonce = await l2Bridge.read.userNonces([userA.account.address]);
+                expect(finalNonce).to.equal(initialNonce + 1n);
+            });
+
+            it("should reject cancelling a non-expired swap", async () => {
+                const fixture = await loadFixture(deployL2BridgeWithExpiredSwapFixture);
+                const { l1Bridge, l2Bridge, userA, userB, publicClient } = fixture;
+
+                // Try to cancel with future expiry
+                const futureExpiry = BigInt(currentTimestamp + 3600); // 1 hour in the future
+
+                // First complete request swap with normal expiry
+                await impersonateAccount(l1Bridge.address);
+                await setBalance(l1Bridge.address, parseEther("10.0"));
+
+                const hash = await l2Bridge.write.completeRequestSwap([
+                    userA.account.address,
+                    swapAmount,
+                    userB.account.address,
+                    tokenAddress,
+                    expectedTokenAmount,
+                    userNonce,
+                    futureExpiry
+                ], { account: l1Bridge.address });
+                await publicClient.waitForTransactionReceipt({ hash });
+
+                await stopImpersonatingAccount(l1Bridge.address);
+
+                await expect(
+                    l2Bridge.write.cancelExpiredSwap([
+                        userA.account.address,
+                        swapAmount,
+                        userB.account.address,
+                        tokenAddress,
+                        expectedTokenAmount,
+                        userNonce,
+                        futureExpiry
+                    ], { account: userA.account.address })
+                ).to.be.rejectedWith("Swap has not expired yet");
+            });
+
+            it("should reject cancelling a non-existent swap", async () => {
+                const fixture = await loadFixture(deployL2BridgeWithExpiredSwapFixture);
+                const { l2Bridge, userA, userB, expiry } = fixture;
+
+                // Try to cancel with different parameters to create a different message hash
+                const differentAmount = swapAmount + 1n;
+
+                await expect(
+                    l2Bridge.write.cancelExpiredSwap([
+                        userA.account.address,
+                        differentAmount,
+                        userB.account.address,
+                        tokenAddress,
+                        expectedTokenAmount,
+                        userNonce,
+                        expiry
+                    ], { account: userA.account.address })
+                ).to.be.rejectedWith("Swap not found or not open");
+            });
+
+            it("should reject cancelling an already filled swap", async () => {
+                const fixture = await loadFixture(deployL2BridgeWithExpiredSwapFixture);
+                const { l1Bridge, l2Bridge, userA, userB, publicClient } = fixture;
+
+                const futureExpiry = BigInt(currentTimestamp + 3600); // 1 hour in the future
+
+                // First complete request swap with normal expiry
+                await impersonateAccount(l1Bridge.address);
+                await setBalance(l1Bridge.address, parseEther("10.0"));
+
+                const hash = await l2Bridge.write.completeRequestSwap([
+                    userA.account.address,
+                    swapAmount,
+                    userB.account.address,
+                    tokenAddress,
+                    expectedTokenAmount,
+                    userNonce,
+                    futureExpiry
+                ], { account: l1Bridge.address });
+                await publicClient.waitForTransactionReceipt({ hash });
+
+                await stopImpersonatingAccount(l1Bridge.address);
+
+                // First fill the swap
+                await mockToken.write.mint([userB.account.address, expectedTokenAmount]);
+                await mockToken.write.approve([l2Bridge.address, expectedTokenAmount], { account: userB.account.address });
+
+                const fillHash = await l2Bridge.write.fillSwap([
+                    userA.account.address,
+                    swapAmount,
+                    userB.account.address,
+                    tokenAddress,
+                    expectedTokenAmount,
+                    userNonce,
+                    futureExpiry
+                ], { account: userB.account.address });
+                await publicClient.waitForTransactionReceipt({ hash: fillHash });
+
+                // Try to cancel the filled swap
+                await expect(
+                    l2Bridge.write.cancelExpiredSwap([
+                        userA.account.address,
+                        swapAmount,
+                        userB.account.address,
+                        tokenAddress,
+                        expectedTokenAmount,
+                        userNonce,
+                        futureExpiry
+                    ], { account: userA.account.address })
+                ).to.be.rejectedWith("Swap not found or not open");
             });
         });
     });
