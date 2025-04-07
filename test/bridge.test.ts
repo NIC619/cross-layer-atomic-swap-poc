@@ -4,6 +4,48 @@ import { impersonateAccount, stopImpersonatingAccount, setBalance, loadFixture, 
 import { encodeAbiParameters, parseAbiParameters, getAddress, parseEther, keccak256 } from "viem";
 import { Sequencer } from "../scripts/sequencer";
 
+/**
+ * Helper function to preconfirm a message hash with the sequencer
+ * @param l2Bridge The L2Bridge contract instance
+ * @param sequencer The sequencer wallet client
+ * @param publicClient The public client
+ * @param messageHash The message hash to preconfirm
+ * @returns The transaction hash of the preconfirmation
+ */
+async function preconfirmMessage(
+    l2Bridge: any,
+    sequencer: any,
+    publicClient: any,
+    messageHash: `0x${string}`
+): Promise<`0x${string}`> {
+    // Sign the message with the sequencer
+    const domain = {
+        name: "L2Bridge",
+        version: "1.0.0",
+        chainId: await publicClient.getChainId(),
+        verifyingContract: l2Bridge.address
+    };
+    const types = {
+        Preconfirm: [
+            { name: "messageHash", type: "bytes32" }
+        ]
+    };
+    const signature = await sequencer.signTypedData({
+        domain,
+        types,
+        primaryType: "Preconfirm",
+        message: {
+            messageHash
+        }
+    });
+    
+    // Preconfirm the message
+    const hash = await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+    await publicClient.waitForTransactionReceipt({ hash });
+    
+    return hash;
+}
+
 describe("Bridge Contracts", () => {
     let currentTimestamp: number;
 
@@ -459,29 +501,9 @@ describe("Bridge Contracts", () => {
                             [userA.account.address, parseEther("1.0"), 0n]
                         )
                     );
-                    // Sign the message with the sequencer
-                    const domain = {
-                        name: "L2Bridge",
-                        version: "1.0.0",
-                        chainId: await publicClient.getChainId(),
-                        verifyingContract: l2Bridge.address
-                    };
-                    const types = {
-                        Preconfirm: [
-                            { name: "messageHash", type: "bytes32" }
-                        ]
-                    };
-                    const signature = await sequencer.signTypedData({
-                        domain,
-                        types,
-                        primaryType: "Preconfirm",
-                        message: {
-                            messageHash
-                        }
-                    });
-                    // Preconfirm the message
-                    const hash = await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
-                    await publicClient.waitForTransactionReceipt({ hash });
+                    
+                    // Use the helper function to preconfirm the message
+                    await preconfirmMessage(l2Bridge, sequencer, publicClient, messageHash);
 
                     // Verify the message is preconfirmed
                     const isPreconfirmed = await l2Bridge.read.preconfirmedMessages([messageHash]);
@@ -506,14 +528,12 @@ describe("Bridge Contracts", () => {
                         chainId: await publicClient.getChainId(),
                         verifyingContract: l2Bridge.address
                     };
-
                     const types = {
                         Preconfirm: [
                             { name: "messageHash", type: "bytes32" }
                         ]
                     };
-
-                    const signature = await userB.signTypedData({
+                    const signature =  await userB.signTypedData({
                         domain,
                         types,
                         primaryType: "Preconfirm",
@@ -597,26 +617,7 @@ describe("Bridge Contracts", () => {
                 );
 
                 // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash
-                    }
-                });
-                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, messageHash);
 
                 const initialBalance = await publicClient.getBalance({ address: userA.account.address });
 
@@ -658,27 +659,8 @@ describe("Bridge Contracts", () => {
                     l2Bridge.write.completeDeposit([userA.account.address, depositAmount, userNonce], { value: depositAmount })
                 ).to.be.rejectedWith("Message not preconfirmed");
 
-                // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash
-                    }
-                });
-                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+                // Preconfirm the message using the helper function
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, messageHash);
 
                 // Now complete deposit should work
                 const hash = await l2Bridge.write.completeDeposit([userA.account.address, depositAmount, userNonce], { value: depositAmount });
@@ -700,29 +682,7 @@ describe("Bridge Contracts", () => {
                 );
 
                 // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash
-                    }
-                });
-
-                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, messageHash);
 
                 await impersonateAccount(l1Bridge.address);
                 await setBalance(l1Bridge.address, parseEther("10.0"));
@@ -840,26 +800,7 @@ describe("Bridge Contracts", () => {
                 );
 
                 // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash
-                    }
-                });
-                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, messageHash);
 
                 await impersonateAccount(l1Bridge.address);
                 await setBalance(l1Bridge.address, parseEther("10.0"));
@@ -928,30 +869,8 @@ describe("Bridge Contracts", () => {
                     ], { account: l1Bridge.address })
                 ).to.be.rejectedWith("Message not preconfirmed");
 
-                // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash
-                    }
-                });
-
-                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+                // Preconfirm the message using the helper function
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, messageHash);
 
                 // Now complete request swap should work
                 const hash = await l2Bridge.write.completeRequestSwap([
@@ -988,26 +907,7 @@ describe("Bridge Contracts", () => {
                 );
 
                 // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash
-                    }
-                });
-                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, messageHash);
 
                 await impersonateAccount(l1Bridge.address);
                 await setBalance(l1Bridge.address, parseEther("10.0"));
@@ -1054,26 +954,7 @@ describe("Bridge Contracts", () => {
                 );
 
                 // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash
-                    }
-                });
-                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, messageHash);
 
                 await impersonateAccount(l1Bridge.address);
                 await setBalance(l1Bridge.address, parseEther("10.0"));
@@ -1147,26 +1028,7 @@ describe("Bridge Contracts", () => {
                 );
 
                 // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash
-                    }
-                });
-                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, messageHash);
 
                 // Complete request swap
                 await impersonateAccount(l1Bridge.address);
@@ -1324,26 +1186,7 @@ describe("Bridge Contracts", () => {
                 );
 
                 // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash: expiredMessageHash
-                    }
-                });
-                await l2Bridge.write.preconfirm([[expiredMessageHash], [signature]], { account: sequencer.account.address });
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, expiredMessageHash);
 
                 // Set contract balance directly for ETH swaps
                 await setBalance(l2Bridge.address, swapAmount);
@@ -1419,29 +1262,7 @@ describe("Bridge Contracts", () => {
                 );
 
                 // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash: zeroUserBMessageHash
-                    }
-                });
-
-                await l2Bridge.write.preconfirm([[zeroUserBMessageHash], [signature]], { account: sequencer.account.address });
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, zeroUserBMessageHash);
 
                 // Set contract balance directly for ETH swaps
                 await setBalance(l2Bridge.address, swapAmount);
@@ -1527,26 +1348,7 @@ describe("Bridge Contracts", () => {
                 );
 
                 // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash
-                    }
-                });
-                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, messageHash);
 
                 // Complete request swap
                 await impersonateAccount(l1Bridge.address);
@@ -1643,26 +1445,7 @@ describe("Bridge Contracts", () => {
                 );
 
                 // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash
-                    }
-                });
-                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, messageHash);
 
                 // First complete request swap with normal expiry
                 await impersonateAccount(l1Bridge.address);
@@ -1729,26 +1512,7 @@ describe("Bridge Contracts", () => {
                 );
 
                 // Preconfirm the message
-                const domain = {
-                    name: "L2Bridge",
-                    version: "1.0.0",
-                    chainId: await publicClient.getChainId(),
-                    verifyingContract: l2Bridge.address
-                };
-                const types = {
-                    Preconfirm: [
-                        { name: "messageHash", type: "bytes32" }
-                    ]
-                };
-                const signature = await sequencer.signTypedData({
-                    domain,
-                    types,
-                    primaryType: "Preconfirm",
-                    message: {
-                        messageHash
-                    }
-                });
-                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+                await preconfirmMessage(l2Bridge, sequencer, publicClient, messageHash);
 
                 // First complete request swap with normal expiry
                 await impersonateAccount(l1Bridge.address);
