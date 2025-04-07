@@ -279,10 +279,7 @@ describe("Bridge Contracts", () => {
                 // Deploy a mock ERC20 token
                 const mockToken = await hre.viem.deployContract("MockERC20", ["Mock Token", "MTK", 18]);
                 const tokenAmount = parseEther("100.0");
-                
-                // Mint tokens to the bridge contract
-                await mockToken.write.mint([l1Bridge.address, tokenAmount]);
-                
+                                
                 const withdrawMessageHash = keccak256(
                     encodeAbiParameters(
                         parseAbiParameters("address, address, uint256, uint256"),

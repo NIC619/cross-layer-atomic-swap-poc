@@ -2,14 +2,14 @@
 pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import "hardhat/console.sol";
 
-contract L1Bridge is ReentrancyGuard {
-    using SafeERC20 for IERC20;
+interface IMintableERC20 {
+    function mint(address to, uint256 amount) external;
+}
 
+contract L1Bridge is ReentrancyGuard {
     address public constant ETH = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
 
     event Deposit(
@@ -115,8 +115,8 @@ contract L1Bridge is ReentrancyGuard {
             (bool success, ) = user.call{value: amount}("");
             require(success, "ETH transfer failed");
         } else {
-            // ERC20 token withdrawal
-            IERC20(token).safeTransfer(user, amount);
+            // Assume tokens are L2 native, use `mint` instead of `transfer`
+            IMintableERC20(token).mint(user, amount);
         }
 
         emit WithdrawalClaimed(user, token, amount, userL2Nonce, withdrawMessageHash);
