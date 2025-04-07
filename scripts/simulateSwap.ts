@@ -62,7 +62,8 @@ async function deployContracts() {
 
     console.log("Deploying L2Bridge...");
     const l2BridgeDeployed = await hre.viem.deployContract("L2Bridge", [
-        l1BridgeDeployed.address
+        l1BridgeDeployed.address,
+        sequencerAccount.address
     ], {
         client: { public: l2Client, wallet: sequencerL2WalletClient }
     });

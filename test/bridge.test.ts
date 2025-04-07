@@ -2,6 +2,7 @@ import { expect } from "chai";
 import hre from "hardhat";
 import { impersonateAccount, stopImpersonatingAccount, setBalance, loadFixture, time } from "@nomicfoundation/hardhat-toolbox-viem/network-helpers";
 import { encodeAbiParameters, parseAbiParameters, getAddress, parseEther, keccak256 } from "viem";
+import { Sequencer } from "../scripts/sequencer";
 
 describe("Bridge Contracts", () => {
     let currentTimestamp: number;
@@ -403,19 +404,19 @@ describe("Bridge Contracts", () => {
     describe("L2Bridge", () => {
         async function deployL2BridgeFixture() {
             // Get signers
-            const [owner, userA, userB, userC] = await hre.viem.getWalletClients();
+            const [sequencer, userA, userB, userC] = await hre.viem.getWalletClients();
             const publicClient = await hre.viem.getPublicClient();
 
             // Deploy L1Bridge first
             const l1Bridge = await hre.viem.deployContract("L1Bridge");
 
             // Deploy L2Bridge with L1Bridge address
-            const l2Bridge = await hre.viem.deployContract("L2Bridge", [l1Bridge.address]);
+            const l2Bridge = await hre.viem.deployContract("L2Bridge", [l1Bridge.address, sequencer.account.address]);
 
             return {
                 l1Bridge,
                 l2Bridge,
-                owner,
+                sequencer,
                 userA,
                 userB,
                 userC,
@@ -432,9 +433,148 @@ describe("Bridge Contracts", () => {
             });
 
             it("should reject zero address for L1Bridge", async () => {
+                const { sequencer } = await loadFixture(deployL2BridgeFixture);
                 await expect(
-                    hre.viem.deployContract("L2Bridge", ["0x0000000000000000000000000000000000000000"])
+                    hre.viem.deployContract("L2Bridge", ["0x0000000000000000000000000000000000000000", sequencer.account.address])
                 ).to.be.rejectedWith("Invalid L1Bridge address");
+            });
+
+            it("should reject zero address for Sequencer", async () => {
+                const { l1Bridge } = await loadFixture(deployL2BridgeFixture);
+                await expect(
+                    hre.viem.deployContract("L2Bridge", [l1Bridge.address, "0x0000000000000000000000000000000000000000"])
+                ).to.be.rejectedWith("Invalid sequencer address");
+            });
+        });
+
+        describe("Sequencer", () => {
+            describe("preconfirm", () => {
+                it("should allow sequencer to preconfirm messages", async () => {
+                    const { l2Bridge, sequencer, userA, publicClient } = await loadFixture(deployL2BridgeFixture);
+                    
+                    // Create a message hash to preconfirm
+                    const messageHash = keccak256(
+                        encodeAbiParameters(
+                            parseAbiParameters("address, uint256, uint256"),
+                            [userA.account.address, parseEther("1.0"), 0n]
+                        )
+                    );
+                    // Sign the message with the sequencer
+                    const domain = {
+                        name: "L2Bridge",
+                        version: "1.0.0",
+                        chainId: await publicClient.getChainId(),
+                        verifyingContract: l2Bridge.address
+                    };
+                    const types = {
+                        Preconfirm: [
+                            { name: "messageHash", type: "bytes32" }
+                        ]
+                    };
+                    const signature = await sequencer.signTypedData({
+                        domain,
+                        types,
+                        primaryType: "Preconfirm",
+                        message: {
+                            messageHash
+                        }
+                    });
+                    // Preconfirm the message
+                    const hash = await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+                    await publicClient.waitForTransactionReceipt({ hash });
+
+                    // Verify the message is preconfirmed
+                    const isPreconfirmed = await l2Bridge.read.preconfirmedMessages([messageHash]);
+                    expect(isPreconfirmed).to.be.true;
+                });
+
+                it("should reject preconfirmation with invalid signature", async () => {
+                    const { l2Bridge, userA, userB, publicClient } = await loadFixture(deployL2BridgeFixture);
+                    
+                    // Create a message hash to preconfirm
+                    const messageHash = keccak256(
+                        encodeAbiParameters(
+                            parseAbiParameters("address, uint256, uint256"),
+                            [userA.account.address, parseEther("1.0"), 0n]
+                        )
+                    );
+
+                    // Sign the message with a non-sequencer (userB)
+                    const domain = {
+                        name: "L2Bridge",
+                        version: "1.0.0",
+                        chainId: await publicClient.getChainId(),
+                        verifyingContract: l2Bridge.address
+                    };
+
+                    const types = {
+                        Preconfirm: [
+                            { name: "messageHash", type: "bytes32" }
+                        ]
+                    };
+
+                    const signature = await userB.signTypedData({
+                        domain,
+                        types,
+                        primaryType: "Preconfirm",
+                        message: {
+                            messageHash
+                        }
+                    });
+
+                    // Attempt to preconfirm with invalid signature
+                    await expect(
+                        l2Bridge.write.preconfirm([[messageHash], [signature]], { account: userB.account.address })
+                    ).to.be.rejectedWith("Invalid sequencer signature");
+                });
+            });
+
+            describe("transferSequencership", () => {
+                it("should allow sequencer to transfer role", async () => {
+                    const { l2Bridge, sequencer, userA, publicClient } = await loadFixture(deployL2BridgeFixture);
+                    
+                    // Transfer sequencership to userA
+                    const hash = await l2Bridge.write.transferSequencership([userA.account.address], { account: sequencer.account.address });
+                    await publicClient.waitForTransactionReceipt({ hash });
+
+                    // Verify the new sequencer
+                    const newSequencer = await l2Bridge.read.sequencer();
+                    expect(newSequencer.toLowerCase()).to.equal(userA.account.address.toLowerCase());
+
+                    // Verify the event was emitted
+                    const events = await l2Bridge.getEvents.SequencershipTransferred();
+                    expect(events).to.have.lengthOf(1);
+                    const event = events[0];
+                    expect(event.args?.previousSequencer?.toLowerCase()).to.equal(sequencer.account.address.toLowerCase());
+                    expect(event.args?.newSequencer?.toLowerCase()).to.equal(userA.account.address.toLowerCase());
+                });
+
+                it("should reject sequencer transfer from non-sequencer", async () => {
+                    const { l2Bridge, userA, userB } = await loadFixture(deployL2BridgeFixture);
+                    
+                    // Attempt to transfer sequencership from non-sequencer
+                    await expect(
+                        l2Bridge.write.transferSequencership([userB.account.address], { account: userA.account.address })
+                    ).to.be.rejectedWith("Only current sequencer can transfer role");
+                });
+
+                it("should reject sequencer transfer to zero address", async () => {
+                    const { l2Bridge, sequencer } = await loadFixture(deployL2BridgeFixture);
+                    
+                    // Attempt to transfer sequencership to zero address
+                    await expect(
+                        l2Bridge.write.transferSequencership(["0x0000000000000000000000000000000000000000"], { account: sequencer.account.address })
+                    ).to.be.rejectedWith("New sequencer cannot be zero address");
+                });
+
+                it("should reject sequencer transfer to current sequencer", async () => {
+                    const { l2Bridge, sequencer } = await loadFixture(deployL2BridgeFixture);
+                    
+                    // Attempt to transfer sequencership to current sequencer
+                    await expect(
+                        l2Bridge.write.transferSequencership([sequencer.account.address], { account: sequencer.account.address })
+                    ).to.be.rejectedWith("New sequencer cannot be current sequencer");
+                });
             });
         });
 
@@ -443,7 +583,7 @@ describe("Bridge Contracts", () => {
             const userNonce = 0n;
 
             it("should complete deposit and transfer ETH to userA", async () => {
-                const { l1Bridge, l2Bridge, userA, publicClient } = await loadFixture(deployL2BridgeFixture);
+                const { l1Bridge, l2Bridge, sequencer, userA, publicClient } = await loadFixture(deployL2BridgeFixture);
 
                 // Set contract balance directly
                 await setBalance(l2Bridge.address, depositAmount);
@@ -455,6 +595,28 @@ describe("Bridge Contracts", () => {
                         [userA.account.address, depositAmount, userNonce]
                     )
                 );
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash
+                    }
+                });
+                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
 
                 const initialBalance = await publicClient.getBalance({ address: userA.account.address });
 
@@ -480,21 +642,51 @@ describe("Bridge Contracts", () => {
                 expect(isProcessed).to.be.true;
             });
 
-            // FIXME: Uncomment this test only if the `msg.sender` check is uncommented in `L2Bridge.completeDeposit`
-            // it("should reject deposit from non-L1Bridge address", async () => {
-            //     const { l2Bridge, userA } = await loadFixture(deployL2BridgeFixture);
+            it("should require preconfirmation for completeDeposit", async () => {
+                const { l2Bridge, sequencer, userA, publicClient } = await loadFixture(deployL2BridgeFixture);
+                
+                // Create message hash
+                const messageHash = keccak256(
+                    encodeAbiParameters(
+                        parseAbiParameters("address, uint256, uint256"),
+                        [userA.account.address, depositAmount, userNonce]
+                    )
+                );
 
-            //     await expect(
-            //         l2Bridge.write.completeDeposit([
-            //             userA.account.address,
-            //             depositAmount,
-            //             userNonce
-            //         ], { account: userA.account.address })
-            //     ).to.be.rejectedWith("Only L1Bridge can complete deposits");
-            // });
+                // Attempt to complete deposit without preconfirmation
+                await expect(
+                    l2Bridge.write.completeDeposit([userA.account.address, depositAmount, userNonce], { value: depositAmount })
+                ).to.be.rejectedWith("Message not preconfirmed");
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash
+                    }
+                });
+                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+
+                // Now complete deposit should work
+                const hash = await l2Bridge.write.completeDeposit([userA.account.address, depositAmount, userNonce], { value: depositAmount });
+                await publicClient.waitForTransactionReceipt({ hash });
+            });
 
             it("should reject already processed deposits", async () => {
-                const { l1Bridge, l2Bridge, userA, publicClient } = await loadFixture(deployL2BridgeFixture);
+                const { l1Bridge, l2Bridge, sequencer, userA, publicClient } = await loadFixture(deployL2BridgeFixture);
 
                 // Set contract balance directly
                 await setBalance(l2Bridge.address, depositAmount);
@@ -506,6 +698,31 @@ describe("Bridge Contracts", () => {
                         [userA.account.address, depositAmount, userNonce]
                     )
                 );
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash
+                    }
+                });
+
+                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
 
                 await impersonateAccount(l1Bridge.address);
                 await setBalance(l1Bridge.address, parseEther("10.0"));
@@ -594,7 +811,7 @@ describe("Bridge Contracts", () => {
 
             async function deployL2BridgeWithTokenFixture(): Promise<L2BridgeWithTokenFixture> {
                 const fixture = await loadFixture(deployL2BridgeFixture);
-                const { l1Bridge, l2Bridge, owner, userA, userB, publicClient } = fixture;
+                const { l1Bridge, l2Bridge, sequencer, userA, userB, publicClient } = fixture;
 
                 // Set contract balance directly for ETH swaps
                 await setBalance(l2Bridge.address, swapAmount);
@@ -603,7 +820,7 @@ describe("Bridge Contracts", () => {
                     l1Bridge,
                     l2Bridge,
                     mockToken,
-                    owner,
+                    sequencer,
                     userA,
                     userB,
                     publicClient
@@ -611,7 +828,7 @@ describe("Bridge Contracts", () => {
             }
 
             it("should complete swap request and set status to Open", async () => {
-                const { l1Bridge, l2Bridge, userA, userB, publicClient } = await loadFixture(deployL2BridgeWithTokenFixture);
+                const { l1Bridge, l2Bridge, sequencer, userA, userB, publicClient } = await loadFixture(deployL2BridgeWithTokenFixture);
                 const expiry = BigInt(currentTimestamp + 3600); // 1 hour from now
 
                 // Compute the message hash
@@ -621,6 +838,28 @@ describe("Bridge Contracts", () => {
                         [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, expiry]
                     )
                 );
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash
+                    }
+                });
+                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
 
                 await impersonateAccount(l1Bridge.address);
                 await setBalance(l1Bridge.address, parseEther("10.0"));
@@ -660,10 +899,115 @@ describe("Bridge Contracts", () => {
                 expect(event.args.expiry).to.equal(expiry);
                 expect(event.args.messageHash).to.equal(messageHash);
             });
-            
-            it("should reject already processed swap requests", async () => {
-                const { l1Bridge, l2Bridge, userA, userB, publicClient } = await loadFixture(deployL2BridgeWithTokenFixture);
+
+            it("should require preconfirmation for completeRequestSwap", async () => {
+                const { l1Bridge, l2Bridge, sequencer, userA, userB, publicClient } = await loadFixture(deployL2BridgeWithTokenFixture);
                 const expiry = BigInt(currentTimestamp + 3600);
+
+                // Compute the message hash
+                const messageHash = keccak256(
+                    encodeAbiParameters(
+                        parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
+                        [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, expiry]
+                    )
+                );
+
+                await impersonateAccount(l1Bridge.address);
+                await setBalance(l1Bridge.address, parseEther("10.0"));
+
+                // Attempt to complete request swap without preconfirmation
+                await expect(
+                    l2Bridge.write.completeRequestSwap([
+                        userA.account.address,
+                        swapAmount,
+                        userB.account.address,
+                        tokenAddress,
+                        expectedTokenAmount,
+                        userNonce,
+                        expiry
+                    ], { account: l1Bridge.address })
+                ).to.be.rejectedWith("Message not preconfirmed");
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash
+                    }
+                });
+
+                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
+
+                // Now complete request swap should work
+                const hash = await l2Bridge.write.completeRequestSwap([
+                    userA.account.address,
+                    swapAmount,
+                    userB.account.address,
+                    tokenAddress,
+                    expectedTokenAmount,
+                    userNonce,
+                    expiry
+                ], { account: l1Bridge.address });
+                await publicClient.waitForTransactionReceipt({ hash });
+
+                await stopImpersonatingAccount(l1Bridge.address);
+
+                // Verify the swap was completed successfully
+                const isProcessed = await l2Bridge.read.processedMessages([messageHash]);
+                expect(isProcessed).to.be.true;
+
+                const swapStatus = await l2Bridge.read.swapStatus([messageHash]);
+                expect(swapStatus).to.equal(1n); // 1 = Open
+            });
+
+            it("should reject already processed swap requests", async () => {
+                const { l1Bridge, l2Bridge, sequencer, userA, userB, publicClient } = await loadFixture(deployL2BridgeWithTokenFixture);
+                const expiry = BigInt(currentTimestamp + 3600);
+
+                // Compute the message hash
+                const messageHash = keccak256(
+                    encodeAbiParameters(
+                        parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
+                        [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, expiry]
+                    )
+                );
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash
+                    }
+                });
+                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
 
                 await impersonateAccount(l1Bridge.address);
                 await setBalance(l1Bridge.address, parseEther("10.0"));
@@ -697,7 +1041,7 @@ describe("Bridge Contracts", () => {
             });
 
             it("should allow swap request with zero address for userB", async () => {
-                const { l1Bridge, l2Bridge, userA, publicClient } = await loadFixture(deployL2BridgeWithTokenFixture);
+                const { l1Bridge, l2Bridge, sequencer, userA, publicClient } = await loadFixture(deployL2BridgeWithTokenFixture);
                 const expiry = BigInt(currentTimestamp + 3600);
                 const zeroAddress = "0x0000000000000000000000000000000000000000" as `0x${string}`;
 
@@ -708,6 +1052,28 @@ describe("Bridge Contracts", () => {
                         [userA.account.address, swapAmount, zeroAddress, tokenAddress, expectedTokenAmount, userNonce, expiry]
                     )
                 );
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash
+                    }
+                });
+                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
 
                 await impersonateAccount(l1Bridge.address);
                 await setBalance(l1Bridge.address, parseEther("10.0"));
@@ -748,7 +1114,7 @@ describe("Bridge Contracts", () => {
                 l1Bridge: any;
                 l2Bridge: any;
                 mockToken: any;
-                owner: any;
+                sequencer: any;
                 userA: any;
                 userB: any;
                 userC: any;
@@ -758,7 +1124,7 @@ describe("Bridge Contracts", () => {
 
             async function deployL2BridgeWithTokenAndSwapFixture(): Promise<L2BridgeWithTokenAndSwapFixture> {
                 const fixture = await loadFixture(deployL2BridgeFixture);
-                const { l1Bridge, l2Bridge, owner, userA, userB, userC, publicClient } = fixture;
+                const { l1Bridge, l2Bridge, sequencer, userA, userB, userC, publicClient } = fixture;
                 const expiry = BigInt(currentTimestamp + 3600); // 1 hour from now
 
                 // Set contract balance directly for ETH swaps
@@ -771,6 +1137,36 @@ describe("Bridge Contracts", () => {
                 await mockToken.write.mint([userB.account.address, expectedTokenAmount]);
                 // Approve L2Bridge to spend tokens
                 await mockToken.write.approve([l2Bridge.address, expectedTokenAmount], { account: userB.account.address });
+
+                // Compute the message hash
+                messageHash = keccak256(
+                    encodeAbiParameters(
+                        parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
+                        [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, expiry]
+                    )
+                );
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash
+                    }
+                });
+                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
 
                 // Complete request swap
                 await impersonateAccount(l1Bridge.address);
@@ -789,19 +1185,11 @@ describe("Bridge Contracts", () => {
 
                 await stopImpersonatingAccount(l1Bridge.address);
 
-                // Compute the message hash
-                messageHash = keccak256(
-                    encodeAbiParameters(
-                        parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
-                        [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, expiry]
-                    )
-                );
-
                 return {
                     l1Bridge,
                     l2Bridge,
                     mockToken,
-                    owner,
+                    sequencer,
                     userA,
                     userB,
                     userC,
@@ -812,7 +1200,15 @@ describe("Bridge Contracts", () => {
 
             it("should fill swap and transfer tokens and ETH", async () => {
                 const fixture = await loadFixture(deployL2BridgeWithTokenAndSwapFixture);
-                const { l2Bridge, mockToken, userA, userB, publicClient, expiry } = fixture;
+                const { l2Bridge, mockToken, sequencer, userA, userB, publicClient, expiry } = fixture;
+
+                // Compute the message hash
+                const messageHash = keccak256(
+                    encodeAbiParameters(
+                        parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
+                        [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, expiry]
+                    )
+                );
 
                 // Get initial balances
                 const initialUserTokenBalance = await mockToken.read.balanceOf([userA.account.address]);
@@ -876,7 +1272,15 @@ describe("Bridge Contracts", () => {
 
             it("should reject filling an already filled swap", async () => {
                 const fixture = await loadFixture(deployL2BridgeWithTokenAndSwapFixture);
-                const { l2Bridge, userA, userB, expiry, publicClient } = fixture;
+                const { l2Bridge, sequencer, userA, userB, expiry, publicClient } = fixture;
+
+                // Compute the message hash
+                const messageHash = keccak256(
+                    encodeAbiParameters(
+                        parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
+                        [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, expiry]
+                    )
+                );
 
                 // Fill swap first time
                 const hash1 = await l2Bridge.write.fillSwap([
@@ -906,7 +1310,7 @@ describe("Bridge Contracts", () => {
 
             it("should reject filling an expired swap", async () => {
                 const fixture = await loadFixture(deployL2BridgeWithTokenAndSwapFixture);
-                const { l1Bridge, l2Bridge, userA, userB, publicClient } = fixture;
+                const { l1Bridge, l2Bridge, sequencer, userA, userB, publicClient } = fixture;
 
                 // Set expiry to the past
                 const expiredTime = BigInt(currentTimestamp - 3600); // 1 hour ago
@@ -918,6 +1322,28 @@ describe("Bridge Contracts", () => {
                         [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, expiredTime]
                     )
                 );
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash: expiredMessageHash
+                    }
+                });
+                await l2Bridge.write.preconfirm([[expiredMessageHash], [signature]], { account: sequencer.account.address });
 
                 // Set contract balance directly for ETH swaps
                 await setBalance(l2Bridge.address, swapAmount);
@@ -961,7 +1387,7 @@ describe("Bridge Contracts", () => {
             
             it("should reject filling a swap from non-userB when userB is specified", async () => {
                 const fixture = await loadFixture(deployL2BridgeWithTokenAndSwapFixture);
-                const { l2Bridge, userA, userB, userC, expiry } = fixture;
+                const { l2Bridge, sequencer, userA, userB, userC, expiry, publicClient } = fixture;
 
                 // Try to fill swap from userC instead of userB
                 await expect(
@@ -979,7 +1405,7 @@ describe("Bridge Contracts", () => {
 
             it("should allow anyone to fill a swap when userB is zero address", async () => {
                 const fixture = await loadFixture(deployL2BridgeWithTokenAndSwapFixture);
-                const { l1Bridge, l2Bridge, userA, userB, userC, publicClient } = fixture;
+                const { l1Bridge, l2Bridge, sequencer, userA, userB, userC, publicClient } = fixture;
 
                 const expiry = BigInt(currentTimestamp + 3600);
                 const zeroAddress = "0x0000000000000000000000000000000000000000" as `0x${string}`;
@@ -991,6 +1417,31 @@ describe("Bridge Contracts", () => {
                         [userA.account.address, swapAmount, zeroAddress, tokenAddress, expectedTokenAmount, userNonce, expiry]
                     )
                 );
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash: zeroUserBMessageHash
+                    }
+                });
+
+                await l2Bridge.write.preconfirm([[zeroUserBMessageHash], [signature]], { account: sequencer.account.address });
 
                 // Set contract balance directly for ETH swaps
                 await setBalance(l2Bridge.address, swapAmount);
@@ -1048,7 +1499,7 @@ describe("Bridge Contracts", () => {
                 l1Bridge: any;
                 l2Bridge: any;
                 mockToken: any;
-                owner: any;
+                sequencer: any;
                 userA: any;
                 userB: any;
                 publicClient: any;
@@ -1057,7 +1508,7 @@ describe("Bridge Contracts", () => {
 
             async function deployL2BridgeWithExpiredSwapFixture(): Promise<L2BridgeWithExpiredSwapFixture> {
                 const fixture = await loadFixture(deployL2BridgeFixture);
-                const { l1Bridge, l2Bridge, owner, userA, userB, publicClient } = fixture;
+                const { l1Bridge, l2Bridge, sequencer, userA, userB, publicClient } = fixture;
                 const expiry = BigInt(currentTimestamp - 3600); // 1 hour ago (expired)
 
                 // Set contract balance directly for ETH swaps
@@ -1066,6 +1517,36 @@ describe("Bridge Contracts", () => {
                 // Deploy a mock ERC20 token
                 mockToken = await hre.viem.deployContract("MockERC20", ["Mock Token", "MTK", 18]);
                 tokenAddress = mockToken.address as `0x${string}`;
+
+                // Compute the message hash
+                messageHash = keccak256(
+                    encodeAbiParameters(
+                        parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
+                        [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, expiry]
+                    )
+                );
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash
+                    }
+                });
+                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
 
                 // Complete request swap
                 await impersonateAccount(l1Bridge.address);
@@ -1084,19 +1565,11 @@ describe("Bridge Contracts", () => {
 
                 await stopImpersonatingAccount(l1Bridge.address);
 
-                // Compute the message hash
-                messageHash = keccak256(
-                    encodeAbiParameters(
-                        parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
-                        [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, expiry]
-                    )
-                );
-
                 return {
                     l1Bridge,
                     l2Bridge,
                     mockToken,
-                    owner,
+                    sequencer,
                     userA,
                     userB,
                     publicClient,
@@ -1156,10 +1629,40 @@ describe("Bridge Contracts", () => {
 
             it("should reject cancelling a non-expired swap", async () => {
                 const fixture = await loadFixture(deployL2BridgeWithExpiredSwapFixture);
-                const { l1Bridge, l2Bridge, userA, userB, publicClient } = fixture;
+                const { l1Bridge, l2Bridge, sequencer, userA, userB, publicClient } = fixture;
 
                 // Try to cancel with future expiry
                 const futureExpiry = BigInt(currentTimestamp + 3600); // 1 hour in the future
+
+                // Compute the message hash
+                const messageHash = keccak256(
+                    encodeAbiParameters(
+                        parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
+                        [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, futureExpiry]
+                    )
+                );
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash
+                    }
+                });
+                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
 
                 // First complete request swap with normal expiry
                 await impersonateAccount(l1Bridge.address);
@@ -1193,7 +1696,7 @@ describe("Bridge Contracts", () => {
 
             it("should reject cancelling a non-existent swap", async () => {
                 const fixture = await loadFixture(deployL2BridgeWithExpiredSwapFixture);
-                const { l2Bridge, userA, userB, expiry } = fixture;
+                const { l2Bridge, sequencer, userA, userB, expiry, publicClient } = fixture;
 
                 // Try to cancel with different parameters to create a different message hash
                 const differentAmount = swapAmount + 1n;
@@ -1213,9 +1716,39 @@ describe("Bridge Contracts", () => {
 
             it("should reject cancelling an already filled swap", async () => {
                 const fixture = await loadFixture(deployL2BridgeWithExpiredSwapFixture);
-                const { l1Bridge, l2Bridge, userA, userB, publicClient } = fixture;
+                const { l1Bridge, l2Bridge, sequencer, userA, userB, publicClient } = fixture;
 
                 const futureExpiry = BigInt(currentTimestamp + 3600); // 1 hour in the future
+
+                // Compute the message hash
+                const messageHash = keccak256(
+                    encodeAbiParameters(
+                        parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
+                        [userA.account.address, swapAmount, userB.account.address, tokenAddress, expectedTokenAmount, userNonce, futureExpiry]
+                    )
+                );
+
+                // Preconfirm the message
+                const domain = {
+                    name: "L2Bridge",
+                    version: "1.0.0",
+                    chainId: await publicClient.getChainId(),
+                    verifyingContract: l2Bridge.address
+                };
+                const types = {
+                    Preconfirm: [
+                        { name: "messageHash", type: "bytes32" }
+                    ]
+                };
+                const signature = await sequencer.signTypedData({
+                    domain,
+                    types,
+                    primaryType: "Preconfirm",
+                    message: {
+                        messageHash
+                    }
+                });
+                await l2Bridge.write.preconfirm([[messageHash], [signature]], { account: sequencer.account.address });
 
                 // First complete request swap with normal expiry
                 await impersonateAccount(l1Bridge.address);

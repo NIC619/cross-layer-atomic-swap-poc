@@ -1,17 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
 import "hardhat/console.sol";
 
-contract L2Bridge is ReentrancyGuard {
+contract L2Bridge is ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
 
     address public immutable L1Bridge;
     address public constant ETH = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+    address public sequencer;
+
+    // EIP-712 typehash for preconfirmation
+    bytes32 private constant PRECONFIRM_TYPEHASH = keccak256("Preconfirm(bytes32 messageHash)");
+
+    event SequencershipTransferred(address indexed previousSequencer, address indexed newSequencer);
 
     // Enum for swap status
     enum SwapStatus { NotExist, Open, Filled, Expired }
@@ -67,14 +75,42 @@ contract L2Bridge is ReentrancyGuard {
     mapping(address => uint256) public userNonces;
     mapping(bytes32 => bool) public processedMessages;
     mapping(bytes32 => SwapStatus) public swapStatus;
+    mapping(bytes32 => bool) public preconfirmedMessages;
 
     /**
-     * @dev Constructor that sets the L1Bridge address
+     * @dev Constructor that sets the L1Bridge address and initializes EIP712
      * @param _l1Bridge Address of the L1Bridge contract
+     * @param _sequencer Address of the sequencer
      */
-    constructor(address _l1Bridge) {
+    constructor(address _l1Bridge, address _sequencer) EIP712("L2Bridge", "1.0.0") {
         require(_l1Bridge != address(0), "Invalid L1Bridge address");
+        require(_sequencer != address(0), "Invalid sequencer address");
         L1Bridge = _l1Bridge;
+        sequencer = _sequencer;
+    }
+
+    /**
+     * @dev Preconfirms multiple messages using EIP-712 signatures
+     * @param messageHashes Array of message hashes to preconfirm
+     * @param preconfSignatures Array of signatures corresponding to the message hashes
+     */
+    function preconfirm(bytes32[] calldata messageHashes, bytes[] calldata preconfSignatures) external {
+        require(messageHashes.length == preconfSignatures.length, "Length mismatch");
+        
+        for (uint256 i = 0; i < messageHashes.length; i++) {
+            bytes32 messageHash = messageHashes[i];
+            bytes memory signature = preconfSignatures[i];
+            
+            // Verify the signature
+            bytes32 structHash = keccak256(abi.encode(PRECONFIRM_TYPEHASH, messageHash));
+            bytes32 hash = _hashTypedDataV4(structHash);
+            address signer = ECDSA.recover(hash, signature);
+            
+            require(signer == sequencer, "Invalid sequencer signature");
+            
+            // Mark the message as preconfirmed
+            preconfirmedMessages[messageHash] = true;
+        }
     }
 
     /**
@@ -97,6 +133,9 @@ contract L2Bridge is ReentrancyGuard {
 
         // Check if this message has already been processed
         require(!processedMessages[messageHash], "Message already processed");
+
+        // Check if the message has been preconfirmed
+        require(preconfirmedMessages[messageHash], "Message not preconfirmed");
 
         // Mark message as processed
         processedMessages[messageHash] = true;
@@ -136,6 +175,9 @@ contract L2Bridge is ReentrancyGuard {
 
         // Check if this message has already been processed
         require(!processedMessages[messageHash], "Message already processed");
+
+        // Check if the message has been preconfirmed
+        require(preconfirmedMessages[messageHash], "Message not preconfirmed");
 
         // Mark message as processed
         processedMessages[messageHash] = true;
@@ -251,6 +293,21 @@ contract L2Bridge is ReentrancyGuard {
         userNonces[userA] = currentNonce + 1;
 
         emit Withdraw(userA, ETH, ETHAmount, currentNonce);
+    }
+
+    /**
+     * @dev Transfers the sequencership to a new address
+     * @param newSequencer Address of the new sequencer
+     */
+    function transferSequencership(address newSequencer) external {
+        require(msg.sender == sequencer, "Only current sequencer can transfer role");
+        require(newSequencer != address(0), "New sequencer cannot be zero address");
+        require(newSequencer != sequencer, "New sequencer cannot be current sequencer");
+
+        address previousSequencer = sequencer;
+        sequencer = newSequencer;
+
+        emit SequencershipTransferred(previousSequencer, newSequencer);
     }
 
     // Function to receive ETH

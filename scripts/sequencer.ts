@@ -1,5 +1,5 @@
 import hre from "hardhat";
-import { PublicClient, WalletClient, Log, decodeEventLog } from "viem";
+import { PublicClient, WalletClient, Log, decodeEventLog, keccak256, encodeAbiParameters, parseAbiParameters } from "viem";
 import { L1Monitor, Deposit, Swap } from "./monitor";
 
 interface DepositCompletedEvent {
@@ -68,6 +68,9 @@ export class Sequencer {
         private walletClient: WalletClient,
         l1Monitor: L1Monitor
     ) {
+        if (!walletClient.account) {
+            throw new Error("Wallet client must have an account");
+        }
         this.l2Client = l2Client;
         this.l2BridgeAddress = l2BridgeAddress;
         this.l2Bridge = null;
@@ -76,7 +79,13 @@ export class Sequencer {
 
     async initialize() {
         this.l2Bridge = await hre.viem.getContractAt("L2Bridge", this.l2BridgeAddress, {
-            client: { public: this.l2Client, wallet: this.walletClient }
+            client: { 
+                public: this.l2Client, 
+                wallet: {
+                    ...this.walletClient,
+                    account: this.walletClient.account
+                }
+            }
         }) as any;
     }
 
@@ -107,6 +116,47 @@ export class Sequencer {
             // Process each deposit
             for (const deposit of pendingDeposits) {
                 try {
+                    // Compute the message hash
+                    const messageHash = keccak256(
+                        encodeAbiParameters(
+                            parseAbiParameters("address, uint256, uint256"),
+                            [deposit.user, deposit.amount, deposit.nonce]
+                        )
+                    );
+
+                    // Get domain for EIP-712 signature
+                    const domain = {
+                        name: "L2Bridge",
+                        version: "1.0.0",
+                        chainId: await this.l2Client.getChainId(),
+                        verifyingContract: this.l2BridgeAddress
+                    };
+
+                    // Define types for EIP-712 signature
+                    const types = {
+                        Preconfirm: [
+                            { name: "messageHash", type: "bytes32" }
+                        ]
+                    };
+
+                    // Sign the message hash
+                    const signature = await this.walletClient.signTypedData({
+                        account: this.walletClient.account,
+                        domain,
+                        types,
+                        primaryType: "Preconfirm",
+                        message: {
+                            messageHash
+                        }
+                    });
+
+                    // Preconfirm the message
+                    const preconfirmHash = await this.l2Bridge.write.preconfirm([[messageHash], [signature]], {
+                        account: this.walletClient.account
+                    });
+                    await this.l2Client.waitForTransactionReceipt({ hash: preconfirmHash });
+
+                    // Complete the deposit
                     const hash = await this.l2Bridge.write.completeDeposit([
                         deposit.user,
                         deposit.amount,
@@ -151,6 +201,55 @@ export class Sequencer {
             // Process each swap
             for (const swap of pendingSwaps) {
                 try {
+                    // Compute the message hash
+                    const messageHash = keccak256(
+                        encodeAbiParameters(
+                            parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
+                            [
+                                swap.userA,
+                                swap.ETHAmount,
+                                swap.userB,
+                                swap.token,
+                                swap.expectedTokenAmount,
+                                swap.nonce,
+                                BigInt(swap.expiry)
+                            ]
+                        )
+                    );
+
+                    // Get domain for EIP-712 signature
+                    const domain = {
+                        name: "L2Bridge",
+                        version: "1.0.0",
+                        chainId: await this.l2Client.getChainId(),
+                        verifyingContract: this.l2BridgeAddress
+                    };
+
+                    // Define types for EIP-712 signature
+                    const types = {
+                        Preconfirm: [
+                            { name: "messageHash", type: "bytes32" }
+                        ]
+                    };
+
+                    // Sign the message hash
+                    const signature = await this.walletClient.signTypedData({
+                        account: this.walletClient.account,
+                        domain,
+                        types,
+                        primaryType: "Preconfirm",
+                        message: {
+                            messageHash
+                        }
+                    });
+
+                    // Preconfirm the message
+                    const preconfirmHash = await this.l2Bridge.write.preconfirm([[messageHash], [signature]], {
+                        account: this.walletClient.account
+                    });
+                    await this.l2Client.waitForTransactionReceipt({ hash: preconfirmHash });
+
+                    // Complete the swap request
                     const hash = await this.l2Bridge.write.completeRequestSwap([
                         swap.userA,
                         swap.ETHAmount,

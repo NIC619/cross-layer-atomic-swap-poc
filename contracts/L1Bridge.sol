@@ -62,8 +62,6 @@ contract L1Bridge is ReentrancyGuard {
         address token,
         uint256 expectedTokenAmount
     ) external payable nonReentrant {
-        console.log("Expiry", expiry);
-        console.log("Current time", block.timestamp);
         require(msg.value > 0, "Zero swap amount");
         require(expiry > block.timestamp, "Expiry must be in the future");
         require(token != address(0), "Invalid token address");
