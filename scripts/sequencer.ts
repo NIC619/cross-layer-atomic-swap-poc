@@ -1,6 +1,7 @@
 import hre from "hardhat";
 import { PublicClient, WalletClient, Log, decodeEventLog, keccak256, encodeAbiParameters, parseAbiParameters } from "viem";
 import { L1Monitor, Deposit, Swap } from "./monitor";
+import { printDim } from "./utils";
 
 interface DepositCompletedEvent {
     eventName: 'DepositCompleted';
@@ -93,7 +94,7 @@ export class Sequencer {
         if (!this.l2Bridge) {
             await this.initialize();
         }
-        console.log("Sequencer: Starting block production...");
+        printDim("Sequencer: Starting block production...");
         // Run block production every second
         this.intervalId = setInterval(() => this.produceBlock(), 1000);
     }
@@ -102,8 +103,8 @@ export class Sequencer {
         if (this.intervalId) {
             clearInterval(this.intervalId);
             this.intervalId = null;
+            printDim("Sequencer: Stopped block production");
         }
-        console.log("Sequencer: Stopped block production");
     }
 
     private async produceBlock() {
@@ -111,7 +112,7 @@ export class Sequencer {
         const pendingDeposits = this.l1Monitor.getPendingDeposits();
 
         if (pendingDeposits.length > 0) {
-            console.log(`Sequencer: Processing ${pendingDeposits.length} deposits in new block`);
+            printDim(`Sequencer: Processing ${pendingDeposits.length} deposits in new block`);
 
             // Process each deposit
             for (const deposit of pendingDeposits) {
@@ -179,12 +180,12 @@ export class Sequencer {
                     });
 
                     if (depositCompletedEvent) {
-                        console.log(`Sequencer: DepositCompleted event found for user ${deposit.user}`);
+                        printDim(`Sequencer: Deposit processed for user ${deposit.user}`);
                     } else {
-                        console.warn(`Sequencer: No DepositCompleted event found for user ${deposit.user}`);
+                        printDim(`Sequencer: Deposit processing failed for user ${deposit.user}`);
                     }
                 } catch (error) {
-                    console.error(`Sequencer: Error processing deposit for user ${deposit.user}:`, error);
+                    printDim(`Sequencer: Error processing deposit for user ${deposit.user}:`, error);
                 }
             }
 
@@ -196,7 +197,7 @@ export class Sequencer {
         const pendingSwaps = this.l1Monitor.getPendingSwaps();
 
         if (pendingSwaps.length > 0) {
-            console.log(`Sequencer: Processing ${pendingSwaps.length} swaps in new block`);
+            printDim(`Sequencer: Processing ${pendingSwaps.length} swaps in new block`);
 
             // Process each swap
             for (const swap of pendingSwaps) {
@@ -276,12 +277,12 @@ export class Sequencer {
                     });
 
                     if (requestSwapCompletedEvent) {
-                        console.log(`Sequencer: RequestSwapCompleted event found for userA ${swap.userA}`);
+                        printDim(`Sequencer: Swap request processed for userA ${swap.userA}`);
                     } else {
-                        console.warn(`Sequencer: No RequestSwapCompleted event found for userA ${swap.userA}`);
+                        printDim(`Sequencer: Swap request processing failed for userA ${swap.userA}`);
                     }
                 } catch (error) {
-                    console.error(`Sequencer: Error processing swap for userA ${swap.userA}:`, error);
+                    printDim(`Sequencer: Error processing swap for userA ${swap.userA}:`, error);
                 }
             }
 
@@ -292,11 +293,11 @@ export class Sequencer {
         // Check for expired swaps and cancel them
         const expiredSwaps = this.l1Monitor.getExpiredSwaps();
         if (expiredSwaps.length > 0) {
-            console.log(`Sequencer: Found ${expiredSwaps.length} expired swaps to cancel`);
+            printDim(`Sequencer: Found ${expiredSwaps.length} expired swaps to cancel`);
 
             for (const swap of expiredSwaps) {
                 try {
-                    console.log(`Sequencer: Cancelling expired swap for userA ${swap.userA}`);
+                    printDim(`Sequencer: Cancelling expired swap for userA ${swap.userA}`);
                     const hash = await this.l2Bridge.write.cancelExpiredSwap([
                         swap.userA,
                         swap.ETHAmount,
@@ -323,14 +324,14 @@ export class Sequencer {
                     });
 
                     if (swapCancelledEvent) {
-                        console.log(`Sequencer: SwapCancelled event found for userA ${swap.userA}`);
+                        printDim(`Sequencer: Swap cancelled for userA ${swap.userA}`);
                         // Remove the swap from unfilled swaps list
                         this.l1Monitor.removeUnfilledSwap(swap.messageHash);
                     } else {
-                        console.warn(`Sequencer: No SwapCancelled event found for userA ${swap.userA}`);
+                        printDim(`Sequencer: Swap cancellation failed for userA ${swap.userA}`);
                     }
                 } catch (error) {
-                    console.error(`Sequencer: Error cancelling expired swap for userA ${swap.userA}:`, error);
+                    printDim(`Sequencer: Error cancelling expired swap for userA ${swap.userA}:`, error);
                 }
             }
         }
@@ -353,17 +354,17 @@ export class Sequencer {
                             const messageHash = decodedLog.args.messageHash as `0x${string}`;
                             // Remove the filled swap from unfilled swaps list
                             this.l1Monitor.removeUnfilledSwap(messageHash);
-                            console.log(`Sequencer: SwapFilled event detected, removed swap from unfilled list`);
+                            printDim(`Sequencer: Swap filled, removed swap from unfilled list`);
                         }
                     } catch (error) {
-                        console.error("Sequencer: Error processing SwapFilled event:", error);
+                        printDim("Sequencer: Error processing SwapFilled event:", error);
                     }
                 }
             },
         });
 
         if (pendingDeposits.length === 0 && pendingSwaps.length === 0 && expiredSwaps.length === 0) {
-            console.log("Sequencer: No pending deposits, swaps, or expired swaps to process");
+            printDim("Sequencer: No pending deposits, swaps, or expired swaps to process");
         }
     }
 } 

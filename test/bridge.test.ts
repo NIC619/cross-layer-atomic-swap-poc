@@ -982,7 +982,7 @@ describe("Bridge Contracts", () => {
                 expect(swapStatus).to.equal(1n); // 1 = Open
             });
         });
-        
+
         describe("FillSwap", () => {
             const swapAmount = parseEther("1.0");
             const expectedTokenAmount = parseEther("1000.0");

@@ -1,5 +1,6 @@
 import hre from "hardhat";
 import { PublicClient, Log, decodeEventLog, encodeAbiParameters, parseAbiParameters, keccak256 } from "viem";
+import { printDim } from "./utils";
 
 interface DepositEvent {
     eventName: 'Deposit';
@@ -70,8 +71,8 @@ export class L1Monitor {
     }
     this.isMonitoring = true;
 
-    console.log("L1Monitor: Starting to watch for deposits and swaps...");
-    console.log("L1Monitor: Watching address:", this.l1Bridge.address);
+    printDim("L1Monitor: Starting to watch for deposits and swaps...");
+    printDim("L1Monitor: Watching address: " + this.l1Bridge.address);
 
     // Watch for Deposit events
     this.l1Client.watchContractEvent({
@@ -98,9 +99,7 @@ export class L1Monitor {
             ) as `0x${string}`
           };
           this.deposits.push(deposit);
-          console.log(
-            `L1Monitor: New deposit detected - User: ${deposit.user}, Amount: ${deposit.amount}, Nonce: ${deposit.nonce}`
-          );
+          printDim(`L1Monitor: Detected deposit from ${deposit.user} for ${deposit.amount} wei with nonce ${deposit.nonce}`);
         }
       },
     });
@@ -128,7 +127,7 @@ export class L1Monitor {
             expiry: decodedLog.args.expiry,
             messageHash: keccak256(
                 encodeAbiParameters(
-                    parseAbiParameters("address, uint256, address, address, uint256, uint256, uint64"),
+                    parseAbiParameters("address, uint256, address, address, uint256, uint256, uint256"),
                     [
                         decodedLog.args.userA as `0x${string}`,
                         decodedLog.args.ETHAmount,
@@ -136,17 +135,14 @@ export class L1Monitor {
                         decodedLog.args.token as `0x${string}`,
                         decodedLog.args.expectedTokenAmount,
                         decodedLog.args.nonce,
-                        BigInt(decodedLog.args.expiry)
+                        decodedLog.args.expiry
                     ]
                 )
             ) as `0x${string}`
           };
           this.swaps.push(swap);
-          // Add to unfilled swaps list
           this.unfilledSwaps.push(swap);
-          console.log(
-            `L1Monitor: New swap detected - UserA: ${swap.userA}, ETHAmount: ${swap.ETHAmount}, UserB: ${swap.userB}, Token: ${swap.token}, ExpectedTokenAmount: ${swap.expectedTokenAmount}, Nonce: ${swap.nonce}, Expiry: ${swap.expiry}`
-          );
+          printDim(`L1Monitor: Detected swap request from ${swap.userA} to ${swap.userB} for ${swap.ETHAmount} wei and ${swap.expectedTokenAmount} tokens with nonce ${swap.nonce}`);
         }
       },
     });
@@ -154,7 +150,7 @@ export class L1Monitor {
 
   stopMonitoring() {
     this.isMonitoring = false;
-    console.log("L1Monitor: Stopped monitoring");
+    printDim("L1Monitor: Stopped monitoring");
   }
 
   getPendingDeposits(): Deposit[] {
